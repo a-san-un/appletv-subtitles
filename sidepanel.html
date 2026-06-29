@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Apple TV+ Subtitle Panel</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <!-- メイン画面 -->
+    <div
+      id="main-screen"
+      style="display: flex; flex-direction: column; height: 100%"
+    >
+      <header class="header">
+        <div class="logo">
+          <span class="logo-text">Apple TV+ Subtitle Panel</span>
+        </div>
+        <div class="header-actions">
+          <button class="btn-icon" id="btn-freeze" title="字幕更新を一時停止">
+            ⏸
+          </button>
+          <button class="btn-icon" id="btn-clear" title="履歴をクリア">
+            🗑
+          </button>
+        </div>
+      </header>
+
+      <div class="track-selector">
+        <div class="track-slot">
+          <span class="slot-label slot-a">A</span>
+          <select class="track-select" id="select-a">
+            <option value="" disabled selected>
+              — 動画を再生してください —
+            </option>
+          </select>
+        </div>
+        <div class="track-slot">
+          <span class="slot-label slot-b">B</span>
+          <select class="track-select" id="select-b">
+            <option value="" disabled selected>
+              — 動画を再生してください —
+            </option>
+          </select>
+        </div>
+      </div>
+
+      <div class="current-section">
+        <div class="lang-block">
+          <div class="lang-label slot-a">A</div>
+          <div class="current-text en-text" id="en-text">— 待機中 —</div>
+        </div>
+        <div class="lang-divider"></div>
+        <div class="lang-block">
+          <div class="lang-label slot-b">B</div>
+          <div class="current-text ja-text" id="ja-text">— 待機中 —</div>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="history-section">
+        <div class="history-label">HISTORY</div>
+        <div class="history-list" id="history-list"></div>
+      </div>
+
+      <div class="status-bar">
+        <div class="status-dot" id="status-dot"></div>
+        <span class="status-text" id="status-text">起動中...</span>
+      </div>
+    </div>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
