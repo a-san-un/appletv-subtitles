@@ -1,5 +1,13 @@
-// v0.9.0
+// v0.9.1
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・送信
+//
+// [v0.9.1 変更点]
+// - assignTrack(): パルス前に元の mode を記憶し、パルス後に必ず復元する
+//   → ユーザーが画面字幕をオンにしていた場合に消えたままになる問題を修正
+// - reloadAfterSeek(): cues が既にロード済みのトラックはパルス不要なのでスキップ
+//   → シーク後に不要な mode 操作が画面字幕に影響していた問題を修正
+// - assignTrack(): 前のトラックを解除する際、showing 中なら showing のまま戻す
+//   → スロット切り替え時に画面字幕が消える問題を修正
 
 (function () {
   function safeSend(msg) {
@@ -20,6 +28,21 @@
 
   const activeSlots = { A: null, B: null };
   const listenerMap = new WeakMap();
+
+  // 各トラックの「拡張機能が触る前の本来の mode」を記憶する
+  // Apple TV+ がセットした mode を上書きしないための保険
+  const originalModeMap = new WeakMap();
+
+  function rememberOriginalMode(track) {
+    if (!originalModeMap.has(track)) {
+      originalModeMap.set(track, track.mode);
+    }
+  }
+
+  function getOriginalMode(track) {
+    // 記憶がなければ現在の mode をそのまま返す
+    return originalModeMap.get(track) ?? track.mode;
+  }
 
   function attachCueListener(track, slot) {
     if (listenerMap.has(track)) return;
@@ -55,8 +78,16 @@
       const usedByOther = Object.entries(activeSlots).some(
         ([s, t]) => s !== slot && t === prev,
       );
-      if (!usedByOther) prev.mode = "hidden";
+      if (!usedByOther) {
+        // 前のトラックを解除する際も元の mode に戻す
+        prev.mode = getOriginalMode(prev);
+      }
     }
+
+    // パルスを当てる前に元の mode を記憶する
+    rememberOriginalMode(track);
+    const modeToRestore = getOriginalMode(track);
+
     activeSlots[slot] = track;
     attachCueListener(track, slot);
     safeSend({
@@ -66,11 +97,16 @@
       label: formatLabel(track),
     });
 
+    // cues が既にロード済みならパルス不要（初回のみパルスが必要）
+    if (track.cues && track.cues.length > 0) return;
+
+    // cues 未ロード → showing パルスで cues をロードする
+    // パルス後は必ず元の mode（modeToRestore）に戻す
     if (track.mode === "disabled") track.mode = "hidden";
     setTimeout(() => {
       track.mode = "showing";
       setTimeout(() => {
-        track.mode = "hidden";
+        track.mode = modeToRestore;
       }, 1000);
     }, 300);
   }
@@ -79,9 +115,15 @@
     ["A", "B"].forEach((slot) => {
       const track = activeSlots[slot];
       if (!track) return;
+
+      // cues が既にロード済みならシーク後のパルスは不要
+      if (track.cues && track.cues.length > 0) return;
+
+      // cues が未ロード（まれなケース）の場合のみパルスを打つ
+      const modeToRestore = getOriginalMode(track);
       track.mode = "showing";
       setTimeout(() => {
-        track.mode = "hidden";
+        track.mode = modeToRestore;
       }, 1000);
     });
   }
@@ -126,7 +168,6 @@
   function initTracks(video) {
     const validTracks = getValidTracks(video);
 
-    // ▼ setupDone チェック削除。preferredLang がなければ en/ja をデフォルトに
     chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (result) => {
       const langA = result.preferredLangA || "en";
       const langB = result.preferredLangB || "ja";
@@ -154,7 +195,7 @@
   function bindVideoEvents(video) {
     if (currentVideo === video) return;
     currentVideo = video;
-    video.addEventListener("loadedmetadata", () => {
+    video.addEventListener("loadedmetadata\", () => {
       activeSlots.A = null;
       activeSlots.B = null;
       init(video);
