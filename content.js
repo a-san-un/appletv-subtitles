@@ -1,13 +1,16 @@
-// v0.9.1
+// v0.9.2
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・送信
 //
-// [v0.9.1 変更点]
-// - assignTrack(): パルス前に元の mode を記憶し、パルス後に必ず復元する
-//   → ユーザーが画面字幕をオンにしていた場合に消えたままになる問題を修正
-// - reloadAfterSeek(): cues が既にロード済みのトラックはパルス不要なのでスキップ
-//   → シーク後に不要な mode 操作が画面字幕に影響していた問題を修正
-// - assignTrack(): 前のトラックを解除する際、showing 中なら showing のまま戻す
-//   → スロット切り替え時に画面字幕が消える問題を修正
+// [v0.9.2 変更点]
+// - スロットに割り当てたトラックは常に hidden で運用する
+//   → hidden でも cuechange は発火する。disabled のときのみ発火しない
+//   → 画面字幕 on/off に関わらずサイドパネルに常に表示される
+//   → ユーザーが画面字幕を showing にしていても、拡張機能側は hidden に落とす
+//     (画面字幕は Apple TV+ のネイティブUIで別途制御することを前提とする)
+// - showing パルスは disabled → hidden に昇格する場合のみ使用する
+//   → cues の初回ロードに必要。パルス後は常に hidden に戻す
+// - reloadAfterSeek() も同様に disabled のトラックのみパルスする
+// - originalModeMap を削除（不要になったため）
 
 (function () {
   function safeSend(msg) {
@@ -28,21 +31,6 @@
 
   const activeSlots = { A: null, B: null };
   const listenerMap = new WeakMap();
-
-  // 各トラックの「拡張機能が触る前の本来の mode」を記憶する
-  // Apple TV+ がセットした mode を上書きしないための保険
-  const originalModeMap = new WeakMap();
-
-  function rememberOriginalMode(track) {
-    if (!originalModeMap.has(track)) {
-      originalModeMap.set(track, track.mode);
-    }
-  }
-
-  function getOriginalMode(track) {
-    // 記憶がなければ現在の mode をそのまま返す
-    return originalModeMap.get(track) ?? track.mode;
-  }
 
   function attachCueListener(track, slot) {
     if (listenerMap.has(track)) return;
@@ -71,22 +59,35 @@
     }
   }
 
+  // disabled のトラックに対して showing パルスを打って cues をロードさせ、
+  // パルス後は常に hidden に戻す。
+  // hidden / showing のトラックはそのまま hidden に落とすだけで良い。
+  function activateTrack(track) {
+    if (track.mode === "disabled") {
+      // disabled → hidden に昇格したうえでパルス
+      track.mode = "hidden";
+      setTimeout(() => {
+        track.mode = "showing";
+        setTimeout(() => {
+          track.mode = "hidden";
+        }, 1000);
+      }, 300);
+    } else {
+      // hidden または showing → 常に hidden に落とす
+      track.mode = "hidden";
+    }
+  }
+
   function assignTrack(slot, track) {
     const prev = activeSlots[slot];
-    if (prev) {
+    if (prev && prev !== track) {
       detachCueListener(prev);
       const usedByOther = Object.entries(activeSlots).some(
         ([s, t]) => s !== slot && t === prev,
       );
-      if (!usedByOther) {
-        // 前のトラックを解除する際も元の mode に戻す
-        prev.mode = getOriginalMode(prev);
-      }
+      // 他のスロットで使っていなければ disabled に戻す
+      if (!usedByOther) prev.mode = "disabled";
     }
-
-    // パルスを当てる前に元の mode を記憶する
-    rememberOriginalMode(track);
-    const modeToRestore = getOriginalMode(track);
 
     activeSlots[slot] = track;
     attachCueListener(track, slot);
@@ -97,34 +98,17 @@
       label: formatLabel(track),
     });
 
-    // cues が既にロード済みならパルス不要（初回のみパルスが必要）
-    if (track.cues && track.cues.length > 0) return;
-
-    // cues 未ロード → showing パルスで cues をロードする
-    // パルス後は必ず元の mode（modeToRestore）に戻す
-    if (track.mode === "disabled") track.mode = "hidden";
-    setTimeout(() => {
-      track.mode = "showing";
-      setTimeout(() => {
-        track.mode = modeToRestore;
-      }, 1000);
-    }, 300);
+    activateTrack(track);
   }
 
   function reloadAfterSeek() {
     ["A", "B"].forEach((slot) => {
       const track = activeSlots[slot];
       if (!track) return;
-
-      // cues が既にロード済みならシーク後のパルスは不要
-      if (track.cues && track.cues.length > 0) return;
-
-      // cues が未ロード（まれなケース）の場合のみパルスを打つ
-      const modeToRestore = getOriginalMode(track);
-      track.mode = "showing";
-      setTimeout(() => {
-        track.mode = modeToRestore;
-      }, 1000);
+      // シーク後に disabled に落ちている場合のみ再起動
+      if (track.mode === "disabled") {
+        activateTrack(track);
+      }
     });
   }
 
@@ -167,11 +151,9 @@
 
   function initTracks(video) {
     const validTracks = getValidTracks(video);
-
     chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (result) => {
       const langA = result.preferredLangA || "en";
       const langB = result.preferredLangB || "ja";
-
       const trackA = validTracks.find(
         (t) => t.language === langA && t.kind !== "captions",
       );
