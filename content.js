@@ -195,7 +195,7 @@
   function bindVideoEvents(video) {
     if (currentVideo === video) return;
     currentVideo = video;
-    video.addEventListener("loadedmetadata\", () => {
+    video.addEventListener("loadedmetadata", () => {
       activeSlots.A = null;
       activeSlots.B = null;
       init(video);
