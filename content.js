@@ -1,4 +1,4 @@
-// v0.11.0
+// v0.12.0
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・送信
 
 (function () {
@@ -7,9 +7,7 @@
   }
 
   function safeSend(msg) {
-    try {
-      chrome.runtime.sendMessage(msg);
-    } catch (e) {}
+    try { chrome.runtime.sendMessage(msg); } catch (e) {}
   }
 
   function formatLabel(track) {
@@ -57,17 +55,12 @@
     ctLog(`activateTrack lang=${track.language} mode=${track.mode} cues=${track.cues?.length ?? "null"}`);
     if (track.cues && track.cues.length > 0) {
       track.mode = "hidden";
-      ctLog(`activateTrack → cuesあり hidden のまま`);
       return;
     }
     if (track.mode === "disabled") track.mode = "hidden";
     setTimeout(() => {
-      ctLog(`activateTrack → pulse showing lang=${track.language}`);
       track.mode = "showing";
-      setTimeout(() => {
-        track.mode = "hidden";
-        ctLog(`activateTrack → pulse 完了 hidden に戻す lang=${track.language}`);
-      }, 1000);
+      setTimeout(() => { track.mode = "hidden"; }, 1000);
     }, 300);
   }
 
@@ -76,21 +69,12 @@
     const prev = activeSlots[slot];
     if (prev && prev !== track) {
       detachCueListener(prev);
-      const usedByOther = Object.entries(activeSlots).some(
-        ([s, t]) => s !== slot && t === prev,
-      );
+      const usedByOther = Object.entries(activeSlots).some(([s, t]) => s !== slot && t === prev);
       if (!usedByOther) prev.mode = "disabled";
     }
-
     activeSlots[slot] = track;
     attachCueListener(track, slot);
-    safeSend({
-      type: "TRACK_ATTACHED",
-      slot,
-      lang: track.language,
-      label: formatLabel(track),
-    });
-
+    safeSend({ type: "TRACK_ATTACHED", slot, lang: track.language, label: formatLabel(track) });
     activateTrack(track);
   }
 
@@ -98,8 +82,7 @@
     ctLog("seeked 検知、トラック再起動を確認");
     ["A", "B"].forEach((slot) => {
       const track = activeSlots[slot];
-      if (!track) return;
-      if (!track.cues || track.cues.length === 0) {
+      if (track && (!track.cues || track.cues.length === 0)) {
         ctLog(`seeked: slot=${slot} cues空のため activateTrack 再実行`);
         activateTrack(track);
       }
@@ -113,23 +96,17 @@
       if (track.label.toLowerCase().includes("forced")) continue;
       const key = `${track.language}|${formatLabel(track)}|${track.kind}`;
       const existing = seen.get(key);
-      if (!existing || (track.cues && track.cues.length > 0)) {
-        seen.set(key, track);
-      }
+      if (!existing || (track.cues && track.cues.length > 0)) seen.set(key, track);
     }
     return [...seen.values()];
   }
 
-  // トラックが1件以上確定してから送信する。count=0 は送らない。
   let tracksListTimer = null;
   function sendTracksList(video) {
     clearTimeout(tracksListTimer);
     tracksListTimer = setTimeout(() => {
       const tracks = getValidTracks(video);
-      if (tracks.length === 0) {
-        ctLog("TRACKS_LIST スキップ (count=0)");
-        return;
-      }
+      if (tracks.length === 0) { ctLog("TRACKS_LIST スキップ (count=0)"); return; }
       ctLog(`TRACKS_LIST 送信 count=${tracks.length}`);
       safeSend({
         type: "TRACKS_LIST",
@@ -155,26 +132,20 @@
       return;
     }
 
-    // パネルが再オープンされるたびに PANEL_INIT が届く。
-    // すでにトラックが割り当て済みなら現在の状態を再送する。
     if (msg.type === "PANEL_INIT") {
+      // パネルが再オープンされた。現在の状態を再送する。
       const video = document.querySelector("video");
       if (!video) return;
       ctLog("PANEL_INIT 受信: 現在の状態を再送");
       sendTracksList(video);
 
-      // 割り当て済みスロットがあれば TRACK_ATTACHED を再送してスロット選択を復元する
       const hasAttached = Object.values(activeSlots).some((t) => t !== null);
       if (hasAttached) {
+        // 割り当て済みスロットの状態を再送して UI を復元する
         ["A", "B"].forEach((slot) => {
           const track = activeSlots[slot];
           if (!track) return;
-          safeSend({
-            type: "TRACK_ATTACHED",
-            slot,
-            lang: track.language,
-            label: formatLabel(track),
-          });
+          safeSend({ type: "TRACK_ATTACHED", slot, lang: track.language, label: formatLabel(track) });
         });
         safeSend({ type: "READY" });
         ctLog("PANEL_INIT: 再送完了 (READY 送信)");
@@ -192,16 +163,11 @@
     chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (result) => {
       const langA = result.preferredLangA || "en";
       const langB = result.preferredLangB || "ja";
-      const trackA = validTracks.find(
-        (t) => t.language === langA && t.kind !== "captions",
-      );
-      const trackB = validTracks.find(
-        (t) => t.language === langB && t.kind !== "captions",
-      );
+      const trackA = validTracks.find((t) => t.language === langA && t.kind !== "captions");
+      const trackB = validTracks.find((t) => t.language === langB && t.kind !== "captions");
       ctLog(`initTracks trackA=${trackA?.language ?? "none"} trackB=${trackB?.language ?? "none"}`);
       if (trackA) assignTrack("A", trackA);
       if (trackB) assignTrack("B", trackB);
-
       safeSend({ type: "READY" });
       ctLog("READY 送信");
     });
@@ -215,39 +181,48 @@
     video.textTracks.addEventListener("addtrack", () => sendTracksList(video));
   }
 
+  // --- video 要素の監視 ---
+  // Apple TV+ はエピソード切替時に <video> を作り直すため、
+  // MutationObserver で常時監視して差し替えを検出する。
+
   let currentVideo = null;
 
   function bindVideoEvents(video) {
     if (currentVideo === video) return;
     currentVideo = video;
-    ctLog("video 要素を検知、イベントを登録");
+    ctLog("新しい video 要素を検出、イベントを登録");
+
     video.addEventListener("loadedmetadata", () => {
       ctLog("loadedmetadata: スロットをリセットし init() 再実行");
-      activeSlots.A = null;
-      activeSlots.B = null;
+      // 古いリスナーを解除する
+      ["A", "B"].forEach((slot) => {
+        if (activeSlots[slot]) detachCueListener(activeSlots[slot]);
+        activeSlots[slot] = null;
+      });
       init(video);
     });
+
     init(video);
   }
 
-  function waitForVideo() {
-    const video = document.querySelector("video");
-    if (video) {
-      ctLog("waitForVideo: video 即時検知");
-      bindVideoEvents(video);
-    } else {
-      ctLog("waitForVideo: video 未検知、MutationObserver 待機中");
-      const obs = new MutationObserver(() => {
-        const v = document.querySelector("video");
-        if (v) {
-          ctLog("MutationObserver: video 検知");
-          obs.disconnect();
-          bindVideoEvents(v);
-        }
-      });
-      obs.observe(document.body, { childList: true, subtree: true });
+  function watchForVideo() {
+    // 既存 video があれば即バインド
+    const v = document.querySelector("video");
+    if (v) {
+      ctLog("watchForVideo: video 即時検知");
+      bindVideoEvents(v);
     }
+
+    // DOM 変化を常時監視して video の差し替えに対応する
+    const obs = new MutationObserver(() => {
+      const v2 = document.querySelector("video");
+      if (v2 && v2 !== currentVideo) {
+        ctLog("MutationObserver: 新しい video 検知");
+        bindVideoEvents(v2);
+      }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
   }
 
-  waitForVideo();
+  watchForVideo();
 })();

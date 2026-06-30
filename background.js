@@ -1,10 +1,9 @@
-// v0.10.1
+// v0.12.0
 // 役割: content.js ↔ sidepanel.js の双方向メッセージ中継（タブ単位ルーティング）
 
 function bgLog(msg) {
   const line = `[BG ${new Date().toISOString()}] ${msg}`;
   console.log(line);
-  // Service Worker 内のログを接続中の全ポートにブロードキャスト
   for (const [, entry] of tabPorts) {
     if (entry.port) {
       try { entry.port.postMessage({ type: "DEBUG_LOG", line }); } catch (_) {}
@@ -12,9 +11,8 @@ function bgLog(msg) {
   }
 }
 
-// tabId → { port: MessagePort|null, queue: Array }
+// tabId → { port, queue }
 const tabPorts = new Map();
-
 const QUEUE_LIMIT = 50;
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -28,11 +26,11 @@ chrome.runtime.onConnect.addListener((port) => {
       if (!tabPorts.has(boundTabId)) {
         tabPorts.set(boundTabId, { port, queue: [] });
       } else {
-        // 再接続時はポートのみ入れ替え（queue は履歴を保持）
         tabPorts.get(boundTabId).port = port;
       }
       bgLog(`PANEL_INIT tabId=${boundTabId}`);
-      // キューに溜まっていたメッセージを即送出
+
+      // キュー再送
       const entry = tabPorts.get(boundTabId);
       if (entry.queue.length > 0) {
         bgLog(`キュー送出 ${entry.queue.length} 件 tabId=${boundTabId}`);
@@ -40,21 +38,24 @@ chrome.runtime.onConnect.addListener((port) => {
           try { port.postMessage(entry.queue.shift()); } catch (_) {}
         }
       }
+
+      // content.js に PANEL_INIT を転送して状態再送を要求する
+      // （再オープン時に TRACKS_LIST / TRACK_ATTACHED / READY を返してもらう）
+      bgLog(`PANEL_INIT を content.js へ転送 tabId=${boundTabId}`);
+      chrome.tabs.sendMessage(boundTabId, { type: "PANEL_INIT" }).catch(() => {});
       return;
     }
 
     // sidepanel → content.js への SELECT_TRACK 中継
     if (msg.type === "SELECT_TRACK" && boundTabId) {
       bgLog(`SELECT_TRACK slot=${msg.slot} trackIndex=${msg.trackIndex} → tabId=${boundTabId}`);
-      chrome.tabs.sendMessage(boundTabId, msg);
+      chrome.tabs.sendMessage(boundTabId, msg).catch(() => {});
     }
   });
 
   port.onDisconnect.addListener(() => {
     bgLog(`port disconnected tabId=${boundTabId}`);
     if (boundTabId && tabPorts.has(boundTabId)) {
-      // エントリ自体は残す（キューを消さない）。ポートのみ null でクリア。
-      // パネルを開き直した際にキュー済メッセージを再配信できる。
       tabPorts.get(boundTabId).port = null;
     }
   });
@@ -85,10 +86,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     if (entry.port) {
       try { entry.port.postMessage(msg); } catch (_) {}
     } else {
-      // Port 未確立 → キューへ
-      if (entry.queue.length < QUEUE_LIMIT) {
-        entry.queue.push(msg);
-      }
+      if (entry.queue.length < QUEUE_LIMIT) entry.queue.push(msg);
       bgLog(`queued (${entry.queue.length}/${QUEUE_LIMIT}) tabId=${tabId}`);
     }
   } else {
@@ -100,11 +98,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "complete" && tab.url?.includes("tv.apple.com")) {
     bgLog(`tabs.onUpdated: enabling sidePanel for tabId=${tabId}`);
-    chrome.sidePanel.setOptions({
-      tabId,
-      path: "sidepanel.html",
-      enabled: true,
-    });
+    chrome.sidePanel.setOptions({ tabId, path: "sidepanel.html", enabled: true });
   }
 });
 
