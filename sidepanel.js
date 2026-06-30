@@ -1,10 +1,15 @@
-// v0.9.0
+// v0.9.4
 const port = chrome.runtime.connect({ name: "subtitle-panel" });
 port.onMessage.addListener((msg) => handleMessage(msg));
 
+// 接続直後に自分のタブIDを background.js に伝える
+chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+  if (tabs[0]) port.postMessage({ type: "PANEL_INIT", tabId: tabs[0].id });
+});
+
 let currentTracks = [];
 let frozen = false;
-let pendingPair = {}; // ← 追加
+let pendingPair = {};
 
 const textA = document.getElementById("en-text");
 const textB = document.getElementById("ja-text");
@@ -111,7 +116,7 @@ document.getElementById("btn-freeze").addEventListener("click", (e) => {
 
 document.getElementById("btn-clear").addEventListener("click", () => {
   historyEl.innerHTML = "";
-  pendingPair = {}; // ← 追加
+  pendingPair = {};
   textA.textContent = "— 待機中 —";
   textB.textContent = "— 待機中 —";
 });

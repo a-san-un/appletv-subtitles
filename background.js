@@ -1,44 +1,67 @@
-// v0.8.0
-// 役割: content.js ↔ sidepanel.js の双方向メッセージ中継
+// v0.9.4
+// 役割: content.js ↔ sidepanel.js の双方向メッセージ中継（タブ単位ルーティング）
+//
+// [v0.9.4 変更点]
+// - panelPort 単一管理 → tabPorts Map に変更
+//   タブIDをキーに { port, queue } を管理することで
+//   複数タブで同時に拡張機能を使っても字幕が混線しない
+// - sidepanel.js から PANEL_INIT { tabId } を受け取り、
+//   そのポートをタブIDに紐づける
+// - content.js からのメッセージは sender.tab.id でルーティング
 
-let panelPort = null;
-let contentTabId = null;
-const queue = [];
+// tabId → { port, queue: [] }
+const tabPorts = new Map();
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "subtitle-panel") return;
-  panelPort = port;
-  while (queue.length) panelPort.postMessage(queue.shift());
 
-  // sidepanel から Port 経由で来る SELECT_TRACK を中継
+  let boundTabId = null;
+
   port.onMessage.addListener((msg) => {
-    if (msg.type === "SELECT_TRACK" && contentTabId) {
-      chrome.tabs.sendMessage(contentTabId, msg);
+    // サイドパネルが自分のタブIDを名乗る
+    if (msg.type === "PANEL_INIT") {
+      boundTabId = msg.tabId;
+      if (!tabPorts.has(boundTabId)) {
+        tabPorts.set(boundTabId, { port, queue: [] });
+      } else {
+        tabPorts.get(boundTabId).port = port;
+      }
+      // キューに溜まっていたメッセージを送出
+      const entry = tabPorts.get(boundTabId);
+      while (entry.queue.length) port.postMessage(entry.queue.shift());
+      return;
+    }
+
+    // sidepanel → content.js への SELECT_TRACK 中継
+    if (msg.type === "SELECT_TRACK" && boundTabId) {
+      chrome.tabs.sendMessage(boundTabId, msg);
     }
   });
 
   port.onDisconnect.addListener(() => {
-    panelPort = null;
+    if (boundTabId) tabPorts.delete(boundTabId);
   });
 });
 
 chrome.runtime.onMessage.addListener((msg, sender) => {
-  // content.js → sidepanel への転送
-  if (
-    [
-      "SUBTITLE_CUE",
-      "TRACK_ATTACHED",
-      "TRACKS_LIST",
-      "SETUP_REQUIRED",
-    ].includes(msg.type)
-  ) {
-    if (sender.tab) contentTabId = sender.tab.id;
-    if (panelPort) {
-      panelPort.postMessage(msg);
-    } else {
-      queue.push(msg);
-      if (queue.length > 10) queue.shift();
-    }
+  const tabId = sender.tab?.id;
+  if (!tabId) return;
+
+  if (![
+    "SUBTITLE_CUE",
+    "TRACK_ATTACHED",
+    "TRACKS_LIST",
+    "SETUP_REQUIRED",
+  ].includes(msg.type)) return;
+
+  const entry = tabPorts.get(tabId);
+  if (entry) {
+    entry.port.postMessage(msg);
+  } else {
+    // パネルがまだ開いていない場合はキューに保存
+    tabPorts.set(tabId, { port: null, queue: [msg] });
+    const q = tabPorts.get(tabId).queue;
+    if (q.length > 10) q.shift();
   }
 });
 
