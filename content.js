@@ -1,29 +1,36 @@
-// v0.13.3
+// v0.14.0
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・ background.js へ送信
 //
 // 主な処理フロー:
 //   1. watchForVideo() で <video> 要素の出現を MutationObserver で監視
-//   2. <video> 検出後 init() を呼び出す
-//   3. init() が TRACKS_LIST 送信 + preferredLang に基づきトラックを自動割り当て
-//   4. 割り当てたトラックに cuechange リスナーを付け SUBTITLE_CUE を送信
-//   5. PANEL_INIT 受信時は現在の状態を再送して UI を復元する
+//   2. <video> 検出後 bindVideoEvents() を呼び出す
+//   3. bindVideoEvents() で seeked / addtrack をリッスナーを一度だけ登録する
+//   4. init() が TRACKS_LIST 送信 + preferredLang に基づきトラックを自動割り当て
+//   5. 割り当てたトラックに cuechange リッスナーを付け SUBTITLE_CUE を送信
+//   6. PANEL_INIT 受信時は現在の状態を再送して UI を復元する
 //
 // v0.13.3 変更:
 //   - activateTrack: showing 開始・hidden 復帰・cues 件数のログを追加
 //   - reloadAfterSeek: 引数 video を受け取るよう変更し currentTime・cues 件数ログを追加
 //   - getValidTracks: forced 除外・重複上書き・最終件数のログを追加
 //   - init: seeked リスナーを () => reloadAfterSeek(video) に変更
+//
+// v0.14.0 変更:
+//   - seeked / addtrack リスナーを init() から bindVideoEvents() へ移動し、
+//     loadedmetadata 再発火による多重登録を防止
+//   - activateTimers を追加し、スロット単位で前回のタイマーを clearTimeout することで
+//     連打シーク時の showing/hidden 競合を解消
+//   - activateTrack(track, slot) に slot 引数を追加
+//   - 各修正箇所に確認用ログを追加
 
 (function () {
   function ctLog(msg) {
     const line = `[CT ${new Date().toISOString()}] ${msg}`;
     console.log(line);
-    // サイドパネルの DEBUG LOG に転送する
     safeSend({ type: "CT_LOG", line });
   }
 
   // runtime.sendMessage の失敗を握り潰すラッパー
-  // （パネルが閉じているときは接続先がなくてもエラーを出さない）
   function safeSend(msg) {
     try { chrome.runtime.sendMessage(msg); } catch (e) {}
   }
@@ -31,9 +38,6 @@
   // --------------------------------
   // トラックラベルの整形
   // --------------------------------
-  // Apple TV+ のトラックラベルには「(forced)」「CC」表記が混在する。
-  // forced トラック: 外国語セリフのみの字幕（常時表示用）→ フィルタ対象
-  // CC (captions): クローズドキャプション（音声説明付き）→ ラベルに CC 付与
   function formatLabel(track) {
     const raw = track.label || "";
     const trimmed = raw.trim();
@@ -44,20 +48,22 @@
     return base;
   }
 
-  // slot A / B に現在割り当て中のトラックを保持する
   const activeSlots = { A: null, B: null };
-  // track → cuechange ハンドラ の対応表（WeakMap で GC 安全）
   const listenerMap = new WeakMap();
+
+  // ★ スロットごとの activateTrack タイマーID を保持する（競合防止）
+  // assignTrack / reloadAfterSeek のどちらから呼ばれても
+  // 前回のタイマーをキャンセルしてから新しいタイマーを開始する。
+  const activateTimers = { A: null, B: null };
 
   // --------------------------------
   // cuechange リスナーの着脱
   // --------------------------------
   function attachCueListener(track, slot) {
-    if (listenerMap.has(track)) return; // 二重登録防止
+    if (listenerMap.has(track)) return;
     const handler = () => {
       const cues = [...(track.activeCues || [])];
       if (!cues.length) return;
-      // HTML タグを除去してプレーンテキスト化
       const text = cues.map((c) => c.text.replace(/<[^>]*>/g, "")).join("\n");
       ctLog(`cuechange slot=${slot} lang=${track.language} text=${text.slice(0, 30)}`);
       safeSend({
@@ -66,7 +72,7 @@
         lang: track.language,
         label: formatLabel(track),
         text,
-        ts: Date.now(), // ペアマッチング用タイムスタンプ
+        ts: Date.now(),
       });
     };
     track.addEventListener("cuechange", handler);
@@ -84,27 +90,39 @@
   // --------------------------------
   // トラックのアクティブ化
   // --------------------------------
-  // Apple TV+ の DRM 仕様により、textTrack.mode を一時的に
-  // "showing" にしないと VTTCue がロードされない。
-  // content.css の ::cue / ::cue-region で画面表示は完全に隠しているため、
-  // showing 期間中も字幕・黒帯は画面に出ない。
-  // （cues が既にある場合は "hidden" のみで OK）
-  function activateTrack(track) {
-    ctLog(`activateTrack lang=${track.language} mode=${track.mode} cues=${track.cues?.length ?? "null"}`);
+  // slot 引数でタイマーをスロット単位に管理する。
+  // 前回のタイマーが残っていれば clearTimeout してから新しいタイマーを開始する。
+  // これにより連打シーク・手動切り替えでの showing/hidden 競合を防ぐ。
+  function activateTrack(track, slot) {
+    ctLog(`activateTrack lang=${track.language} slot=${slot ?? "none"} mode=${track.mode} cues=${track.cues?.length ?? "null"}`);
+
     if (track.cues && track.cues.length > 0) {
       track.mode = "hidden";
       ctLog(`activateTrack: cues あり → hidden (cues=${track.cues.length}) lang=${track.language}`);
       return;
     }
+
+    // ★ 前回のタイマーをキャンセルする
+    if (slot && activateTimers[slot] != null) {
+      clearTimeout(activateTimers[slot]);
+      activateTimers[slot] = null;
+      ctLog(`activateTrack: 前タイマーキャンセル slot=${slot}`);
+    }
+
     if (track.mode === "disabled") track.mode = "hidden";
-    setTimeout(() => {
-      ctLog(`activateTrack: showing 開始 lang=${track.language}`);
+
+    const t1 = setTimeout(() => {
+      ctLog(`activateTrack: showing 開始 lang=${track.language} slot=${slot ?? "none"}`);
       track.mode = "showing";
-      setTimeout(() => {
+      const t2 = setTimeout(() => {
         ctLog(`activateTrack: hidden 復帰 cues=${track.cues?.length ?? "null"} lang=${track.language}`);
         track.mode = "hidden";
+        if (slot) activateTimers[slot] = null;
       }, 1000);
+      if (slot) activateTimers[slot] = t2;
     }, 300);
+
+    if (slot) activateTimers[slot] = t1;
   }
 
   // スロットにトラックを割り当て、前のトラックのリスナーを解除する
@@ -113,21 +131,18 @@
     const prev = activeSlots[slot];
     if (prev && prev !== track) {
       detachCueListener(prev);
-      // 他のスロットも同じトラックを使っていなければ disabled に戻す
       const usedByOther = Object.entries(activeSlots).some(([s, t]) => s !== slot && t === prev);
       if (!usedByOther) prev.mode = "disabled";
     }
     activeSlots[slot] = track;
     attachCueListener(track, slot);
     safeSend({ type: "TRACK_ATTACHED", slot, lang: track.language, label: formatLabel(track) });
-    activateTrack(track);
+    activateTrack(track, slot); // ★ slot を渡す
   }
 
   // --------------------------------
   // シーク後の再ロード
   // --------------------------------
-  // シーク後は cues が空になることがある。
-  // cues が空のスロットだけ activateTrack を再実行して再ロードを促す。
   function reloadAfterSeek(video) {
     ctLog(`seeked currentTime=${video.currentTime?.toFixed(2)}`);
     ["A", "B"].forEach((slot) => {
@@ -135,8 +150,10 @@
       const cueCount = track?.cues?.length ?? "null";
       ctLog(`seeked slot=${slot} lang=${track?.language ?? "none"} cues=${cueCount}`);
       if (track && (!track.cues || track.cues.length === 0)) {
-        ctLog(`seeked: slot=${slot} cues空のため activateTrack 再実行`);
-        activateTrack(track);
+        ctLog(`seeked: slot=${slot} cues 空のため activateTrack 再実行`);
+        activateTrack(track, slot); // ★ slot を渡す
+      } else if (track) {
+        ctLog(`seeked: slot=${slot} cues=${cueCount} スキップ`);
       }
     });
   }
@@ -144,8 +161,6 @@
   // --------------------------------
   // 有効トラック一覧の取得
   // --------------------------------
-  // Apple TV+ は同一言語のトラックが複数存在することがある。
-  // forced トラックを除外し、同一キーは cues のあるものを優先して重複を排除する。
   function getValidTracks(video) {
     const seen = new Map();
     for (const track of video.textTracks) {
@@ -167,7 +182,8 @@
   }
 
   // TRACKS_LIST 送信（300ms デバウンス）
-  // addtrack が連続して発火するため、まとめて一回だけ送信する
+  // NOTE: tracksListTimer はグローバル1つ。PANEL_INIT と addtrack が
+  // 同時に発火するとデバウンスがリセットされ若干遅延することがあるが実害は軽微。
   let tracksListTimer = null;
   function sendTracksList(video) {
     clearTimeout(tracksListTimer);
@@ -192,7 +208,6 @@
   // --------------------------------
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "SELECT_TRACK") {
-      // ユーザーがセレクトボックスでトラックを選んだ
       const video = document.querySelector("video");
       if (!video) return;
       const track = getValidTracks(video)[msg.trackIndex];
@@ -204,7 +219,6 @@
     }
 
     if (msg.type === "PANEL_INIT") {
-      // パネルが（再）オープンされた → 現在の状態を再送して UI を復元する
       const video = document.querySelector("video");
       if (!video) return;
       ctLog("PANEL_INIT 受信: 現在の状態を再送");
@@ -212,7 +226,6 @@
 
       const hasAttached = Object.values(activeSlots).some((t) => t !== null);
       if (hasAttached) {
-        // 既にトラックが割り当て済み → TRACK_ATTACHED を再送して UI を復元する
         ["A", "B"].forEach((slot) => {
           const track = activeSlots[slot];
           if (!track) return;
@@ -221,7 +234,6 @@
         safeSend({ type: "READY" });
         ctLog("PANEL_INIT: 再送完了 (READY 送信)");
       } else {
-        // まだ未割り当て → 通常の初期化を実行する
         initTracks(video);
       }
       return;
@@ -231,16 +243,12 @@
   // --------------------------------
   // トラックの自動割り当て
   // --------------------------------
-  // chrome.storage.sync から preferredLangA / preferredLangB を読み込み、
-  // 一致するトラックを自動的に A・B スロットへ割り当てる。
-  // （未設定時のデフォルト: A=en / B=ja）
   function initTracks(video) {
     const validTracks = getValidTracks(video);
     ctLog(`initTracks 開始 validTracks=${validTracks.length}`);
     chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (result) => {
       const langA = result.preferredLangA || "en";
       const langB = result.preferredLangB || "ja";
-      // CC（captions）より subtitles を優先して選択する
       const trackA = validTracks.find((t) => t.language === langA && t.kind !== "captions");
       const trackB = validTracks.find((t) => t.language === langB && t.kind !== "captions");
       ctLog(`initTracks trackA=${trackA?.language ?? "none"} trackB=${trackB?.language ?? "none"}`);
@@ -251,21 +259,24 @@
     });
   }
 
+  // --------------------------------
+  // init(): トラック割り当て + TRACKS_LIST 送信
+  // --------------------------------
+  // NOTE: seeked / addtrack リスナーは bindVideoEvents() で1回だけ登録する。
+  // init() は loadedmetadata のたびに再呼び出しされるため、
+  // ここでリスナーを登録すると多重登録になる。
   function init(video) {
     ctLog("init() 開始");
     sendTracksList(video);
     initTracks(video);
-    video.addEventListener("seeked", () => reloadAfterSeek(video));
-    video.textTracks.addEventListener("addtrack", () => sendTracksList(video));
   }
 
   // --------------------------------
-  // <video> 要素の監視
+  // <video> 要素へのイベント登録
   // --------------------------------
-  // Apple TV+ はエピソード切替時に <video> を作り直すため、
-  // MutationObserver で DOM 変化を常時監視して差替えを検出する。
-  // loadedmetadata 発火時にスロットをリセットして init() を再実行する。
-
+  // seeked / addtrack は video 単位で1回だけ登録する。
+  // loadedmetadata（エピソード切替）のたびに init() を再実行して
+  // スロットをリセットし、トラックを再割り当てする。
   let currentVideo = null;
 
   function bindVideoEvents(video) {
@@ -273,12 +284,22 @@
     currentVideo = video;
     ctLog("新しい video 要素を検出、イベントを登録");
 
+    // ★ seeked / addtrack をここで1回だけ登録する（init() に書かない）
+    video.addEventListener("seeked", () => reloadAfterSeek(video));
+    ctLog("seeked リスナー登録");
+    video.textTracks.addEventListener("addtrack", () => sendTracksList(video));
+    ctLog("addtrack リスナー登録");
+
     video.addEventListener("loadedmetadata", () => {
-      ctLog("loadedmetadata: スロットをリセットし init() 再実行");
-      // 古いリスナーを解除してクリーンな状態で再初期化する
+      ctLog(`loadedmetadata: スロットをリセットし init() 再実行 src=${video.src?.slice(-40)}`);
       ["A", "B"].forEach((slot) => {
         if (activeSlots[slot]) detachCueListener(activeSlots[slot]);
         activeSlots[slot] = null;
+        // ★ スロットのタイマーもリセットする
+        if (activateTimers[slot] != null) {
+          clearTimeout(activateTimers[slot]);
+          activateTimers[slot] = null;
+        }
       });
       init(video);
     });
@@ -286,15 +307,16 @@
     init(video);
   }
 
+  // --------------------------------
+  // <video> 要素の監視
+  // --------------------------------
   function watchForVideo() {
-    // 既存 <video> があれば即バインド
     const v = document.querySelector("video");
     if (v) {
       ctLog("watchForVideo: video 即時検知");
       bindVideoEvents(v);
     }
 
-    // DOM 変化を常時監視して <video> の差替えに対応する
     const obs = new MutationObserver(() => {
       const v2 = document.querySelector("video");
       if (v2 && v2 !== currentVideo) {
