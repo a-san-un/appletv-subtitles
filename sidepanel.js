@@ -1,9 +1,9 @@
-// v0.12.0
+// v0.13.1
 // 役割: サイドパネルの UI 制御・メッセージ受信・履歴表示
 //
 // 主な処理:
 //   - 起動時に background.js へ Port 接続し PANEL_INIT を送信する
-//   - TRACKS_LIST 受信でセレクトボックスを生成する
+//   - TRACKS_LIST 受信でセレクトボックスを自動生成する
 //   - SUBTITLE_CUE 受信で字幕テキストを表示し、ペアマッチングして履歴に追加する
 //   - ペアマッチング: A と B の ts 差が PAIR_MATCH_MS 以内ならペア化、
 //     超過した場合は PAIR_TIMEOUT_MS 後に単独追加する
@@ -19,6 +19,10 @@ const debugLogEl = document.getElementById("debug-log");
 function panelLog(msg) {
   const line = `[Panel ${new Date().toISOString()}] ${msg}`;
   console.log(line);
+  appendDebugLine(line);
+}
+
+function appendDebugLine(line) {
   logLines.push(line);
   if (logLines.length > 500) logLines.shift();
   const div = document.createElement("div");
@@ -213,12 +217,12 @@ function addHistory(slot, text, ts) {
 function handleMessage(msg) {
   if (msg.type === "DEBUG_LOG") {
     // background.js のログを画面に表示する
-    logLines.push(msg.line);
-    if (logLines.length > 500) logLines.shift();
-    const div = document.createElement("div");
-    div.textContent = msg.line;
-    debugLogEl.appendChild(div);
-    debugLogEl.scrollTop = debugLogEl.scrollHeight;
+    appendDebugLine(msg.line);
+    return;
+  }
+  if (msg.type === "CT_LOG") {
+    // content.js のログを画面に表示する
+    appendDebugLine(msg.line);
     return;
   }
   if (msg.type === "TRACKS_LIST") {
@@ -237,7 +241,7 @@ function handleMessage(msg) {
   }
   if (msg.type === "READY") {
     // content.js のトラック割り当てが完了した
-    panelLog("READY 受信: content.js トラック割り当て完了");
+    panelLog("レディ受信: content.js トラック割り当て完了");
     setStatus("ready");
     return;
   }

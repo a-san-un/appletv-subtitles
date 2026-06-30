@@ -1,5 +1,5 @@
-// v0.12.0
-// 役割: Apple TV+ の video.textTracks を監視して字幕を取得・background.js へ送信
+// v0.13.1
+// 役割: Apple TV+ の video.textTracks を監視して字幕を取得・ background.js へ送信
 //
 // 主な処理フロー:
 //   1. watchForVideo() で <video> 要素の出現を MutationObserver で監視
@@ -10,7 +10,10 @@
 
 (function () {
   function ctLog(msg) {
-    console.log(`[CT ${new Date().toISOString()}] ${msg}`);
+    const line = `[CT ${new Date().toISOString()}] ${msg}`;
+    console.log(line);
+    // サイドパネルの DEBUG LOG に転送する
+    safeSend({ type: "CT_LOG", line });
   }
 
   // runtime.sendMessage の失敗を握り潰すラッパー
@@ -77,7 +80,8 @@
   // --------------------------------
   // Apple TV+ の DRM 仕様により、textTrack.mode を一時的に
   // "showing" にしないと VTTCue がロードされない。
-  // ただし画面に字幕を表示したくないため 1 秒後に "hidden" へ戻す。
+  // content.css の ::cue / ::cue-region で画面表示は完全に隠しているため、
+  // showing 期間中も字幕・黒帯は画面に出ない。
   // （cues が既にある場合は "hidden" のみで OK）
   function activateTrack(track) {
     ctLog(`activateTrack lang=${track.language} mode=${track.mode} cues=${track.cues?.length ?? "null"}`);
@@ -98,7 +102,7 @@
     const prev = activeSlots[slot];
     if (prev && prev !== track) {
       detachCueListener(prev);
-      // 他のスロットも同じトラックを使っていなければ disabled に戻す
+      // 他のスロットも同じトラックを使っていなければ disabled に戺す
       const usedByOther = Object.entries(activeSlots).some(([s, t]) => s !== slot && t === prev);
       if (!usedByOther) prev.mode = "disabled";
     }
@@ -114,7 +118,7 @@
   // シーク後は cues が空になることがある。
   // cues が空のスロットだけ activateTrack を再実行して再ロードを促す。
   function reloadAfterSeek() {
-    ctLog("seeked 検知、トラック再起動を確認");
+    ctLog("シーク後再起動確認");
     ["A", "B"].forEach((slot) => {
       const track = activeSlots[slot];
       if (track && (!track.cues || track.cues.length === 0)) {
@@ -238,7 +242,7 @@
   // <video> 要素の監視
   // --------------------------------
   // Apple TV+ はエピソード切替時に <video> を作り直すため、
-  // MutationObserver で DOM 変化を常時監視して差し替えを検出する。
+  // MutationObserver で DOM 変化を常時監視して差替えを検出する。
   // loadedmetadata 発火時にスロットをリセットして init() を再実行する。
 
   let currentVideo = null;
@@ -269,7 +273,7 @@
       bindVideoEvents(v);
     }
 
-    // DOM 変化を常時監視して <video> の差し替えに対応する
+    // DOM 変化を常時監視して <video> の差替えに対応する
     const obs = new MutationObserver(() => {
       const v2 = document.querySelector("video");
       if (v2 && v2 !== currentVideo) {
