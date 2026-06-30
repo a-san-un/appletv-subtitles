@@ -1,12 +1,10 @@
-// v0.10.1
+// v0.11.0
 
 // Port 接続を最初に確立する
-// （PANEL_INIT の送信は chrome.tabs.query のコールバック内で行うが、
-//   Port 自体は即座に確立しておかないと BG が postMessage できない）
 const port = chrome.runtime.connect({ name: "subtitle-panel" });
 port.onMessage.addListener((msg) => handleMessage(msg));
 
-// ログ機構（PANEL_INIT より前に定義する必要がある）
+// ログ機構
 const logLines = [];
 const debugLogEl = document.getElementById("debug-log");
 
@@ -36,12 +34,10 @@ debugToggle.addEventListener("click", () => {
   debugToggle.textContent = (open ? "▼" : "▶") + " DEBUG LOG";
 });
 
-// コピー
 document.getElementById("btn-debug-copy").addEventListener("click", () => {
   navigator.clipboard.writeText(logLines.join("\n"));
 });
 
-// .txt 保存
 document.getElementById("btn-debug-save").addEventListener("click", () => {
   const blob = new Blob([logLines.join("\n")], { type: "text/plain" });
   const url = URL.createObjectURL(blob);
@@ -52,7 +48,6 @@ document.getElementById("btn-debug-save").addEventListener("click", () => {
   URL.revokeObjectURL(url);
 });
 
-// クリア
 document.getElementById("btn-debug-clear").addEventListener("click", () => {
   logLines.length = 0;
   debugLogEl.innerHTML = "";
@@ -60,7 +55,14 @@ document.getElementById("btn-debug-clear").addEventListener("click", () => {
 
 let currentTracks = [];
 let frozen = false;
-let pendingPair = {};
+
+// タイムスタンプマッチング用バッファ。
+// 片方のスロットが先に届いたとき、タイムアウトまで相手を待つ。
+const PAIR_TIMEOUT_MS = 500; // 相手を待つ最大時間（ms）
+const PAIR_MATCH_MS  = 300; // この時間差以内ならペアとみなす（ms）
+
+// slot→{text, ts, timer} を保持
+const pairBuffer = {};
 
 const textA = document.getElementById("en-text");
 const textB = document.getElementById("ja-text");
@@ -68,15 +70,9 @@ const historyEl = document.getElementById("history-list");
 const selectA = document.getElementById("select-a");
 const selectB = document.getElementById("select-b");
 
-// ステータスバー要素
-// HTML側の id="status-text" / id="status-dot" に小小客
 const statusTextEl = document.getElementById("status-text");
 const statusDotEl  = document.getElementById("status-dot");
 
-/**
- * @param {"connecting"|"ready"|"waiting"} state
- * @param {string} [label] - 省略時はデフォルト文言語を使用
- */
 function setStatus(state, label) {
   const labels = {
     connecting: "起動中...",
@@ -92,6 +88,7 @@ function setStatus(state, label) {
 }
 
 function populateSelects(tracks) {
+  if (tracks.length === 0) return; // count=0 は無視（内容も content.js 側で抑制済みだが俱備）
   currentTracks = tracks;
   panelLog(`TRACKS_LIST 受信 count=${tracks.length}`);
   chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (prefs) => {
@@ -137,9 +134,66 @@ selectB.addEventListener("change", () => {
   port.postMessage({ type: "SELECT_TRACK", slot: "B", trackIndex: idx });
 });
 
+// 履歴にペアを追加する
+function flushPair(slotA, slotB) {
+  const pair = document.createElement("div");
+  pair.className = "history-pair";
+
+  const rowA = document.createElement("div");
+  rowA.className = "history-item slot-a";
+  rowA.textContent = slotA ?? "";
+
+  const rowB = document.createElement("div");
+  rowB.className = "history-item slot-b";
+  rowB.textContent = slotB ?? "";
+
+  pair.appendChild(rowA);
+  pair.appendChild(rowB);
+  historyEl.appendChild(pair);
+  historyEl.scrollTop = historyEl.scrollHeight;
+}
+
+// タイムスタンプマッチング履歴追加。
+// 相手スロットの ts との差が PAIR_MATCH_MS 以内ならペア化。
+// 超過したらタイムアウト後に単独追加。
+function addHistory(slot, text, ts) {
+  const other = slot === "A" ? "B" : "A";
+
+  if (pairBuffer[other]) {
+    // 相手がバッファにいる → ts 差をチェック
+    if (Math.abs(ts - pairBuffer[other].ts) <= PAIR_MATCH_MS) {
+      // ペア成立
+      clearTimeout(pairBuffer[other].timer);
+      const textA_ = slot === "A" ? text : pairBuffer[other].text;
+      const textB_ = slot === "B" ? text : pairBuffer[other].text;
+      delete pairBuffer[other];
+      flushPair(textA_, textB_);
+      return;
+    }
+    // ts 差が大きい場合は相手を単独追加しバッファを入れ替える
+    clearTimeout(pairBuffer[other].timer);
+    flushPair(
+      other === "A" ? pairBuffer[other].text : undefined,
+      other === "B" ? pairBuffer[other].text : undefined,
+    );
+    delete pairBuffer[other];
+  }
+
+  // バッファに登録し、PAIR_TIMEOUT_MS 後に単独フラッシュ
+  const timer = setTimeout(() => {
+    if (!pairBuffer[slot]) return;
+    flushPair(
+      slot === "A" ? pairBuffer[slot].text : undefined,
+      slot === "B" ? pairBuffer[slot].text : undefined,
+    );
+    delete pairBuffer[slot];
+  }, PAIR_TIMEOUT_MS);
+
+  pairBuffer[slot] = { text, ts, timer };
+}
+
 function handleMessage(msg) {
   if (msg.type === "DEBUG_LOG") {
-    // background.js からのログをパネルに表示
     logLines.push(msg.line);
     if (logLines.length > 500) logLines.shift();
     const div = document.createElement("div");
@@ -171,35 +225,11 @@ function handleMessage(msg) {
     if (frozen) return;
     if (msg.slot === "A") {
       textA.textContent = msg.text;
-      addHistory("A", msg.text);
     } else {
       textB.textContent = msg.text;
-      addHistory("B", msg.text);
     }
-  }
-}
-
-function addHistory(slot, text) {
-  pendingPair[slot] = text;
-
-  if (pendingPair["A"] !== undefined && pendingPair["B"] !== undefined) {
-    const pair = document.createElement("div");
-    pair.className = "history-pair";
-
-    const rowA = document.createElement("div");
-    rowA.className = "history-item slot-a";
-    rowA.textContent = pendingPair["A"];
-
-    const rowB = document.createElement("div");
-    rowB.className = "history-item slot-b";
-    rowB.textContent = pendingPair["B"];
-
-    pair.appendChild(rowA);
-    pair.appendChild(rowB);
-    historyEl.appendChild(pair);
-    historyEl.scrollTop = historyEl.scrollHeight;
-
-    pendingPair = {};
+    // ts をペアマッチングに使用
+    addHistory(msg.slot, msg.text, msg.ts ?? Date.now());
   }
 }
 
@@ -210,11 +240,10 @@ document.getElementById("btn-freeze").addEventListener("click", (e) => {
 
 document.getElementById("btn-clear").addEventListener("click", () => {
   historyEl.innerHTML = "";
-  pendingPair = {};
+  // バッファとタイマーもリセット
+  Object.values(pairBuffer).forEach((b) => clearTimeout(b.timer));
+  Object.keys(pairBuffer).forEach((k) => delete pairBuffer[k]);
   textA.textContent = "— 待機中 —";
   textB.textContent = "— 待機中 —";
-  // 履歴クリア後は待機中に戻す（READY は再割り当てまで起動中に戻るので「接続済み」のまま）
-  setStatus("waiting");
-  // 実際には接続は維持されているのですぐ「接続済み」に戻す
   setStatus("ready");
 });
