@@ -114,6 +114,72 @@ Apple TV+ はページ読み込み直後に `textTracks` が空の場合があ�
 | 過去字幕の取得 | 不可（再生済み部分は遡れない） |
 | `disabled` トラックの cues | ロードされない（`showing` が必要） |
 
+## 実装予定の機能
+
+### 辞書機能
+
+字幕テキスト内の単語をクリックまたはタップしたときに、単語の意味・発音・品詞をポップアップ表示する機能。
+
+**実装方針**
+
+- `sidepanel.js` の字幕表示エリアで `mouseup` / `selectionchange` イベントを監視し、選択テキストを取得する
+- 取得した単語を外部辞書 API（例: [Free Dictionary API](https://dictionaryapi.dev/)）へリクエストする
+- 結果（定義・品詞・発音記号・音声）をポップアップまたはインライン展開で表示する
+- API キーが不要な無料 API を優先し、必要に応じて `chrome.storage.sync` でユーザー独自キーを保存できるようにする
+
+**追加が必要なパーミッション（manifest.json）**
+
+```json
+"host_permissions": ["https://api.dictionaryapi.dev/*"]
+```
+
+**候補 API**
+
+| API | 料金 | 特徴 |
+| --- | --- | --- |
+| [Free Dictionary API](https://dictionaryapi.dev/) | 無料・キー不要 | 英語のみ。定義・品詞・音声 URL 付き |
+| [Merriam-Webster API](https://dictionaryapi.com/) | 無料枠あり | 英語。APIキー必要 |
+| [Jisho API](https://jisho.org/api/v1/) | 無料・キー不要 | 日英辞書。日本語学習向け |
+
+---
+
+### AI 翻訳機能
+
+字幕スロット A（英語）の内容を自動で翻訳してスロット B に表示、または履歴ペアに翻訳を添えて表示する機能。
+Apple TV+ に日本語字幕トラックがない作品でも対訳を見られるようにすることを目的とする。
+
+**実装方針**
+
+- `SUBTITLE_CUE` を `sidepanel.js` で受信したタイミングで翻訳 API を呼び出す
+- 翻訳結果を擬似スロット（`slot: "B-translated"` など）として履歴に追加する
+- 翻訳のオン/オフをトグルボタンで切り替えられるようにする
+- API キーは `chrome.storage.sync` に保存し、設定画面（サイドパネル内）から入力できるようにする
+- レート制限対策として、同一テキストの翻訳結果はセッション内でキャッシュする
+
+**追加が必要なパーミッション（manifest.json）**
+
+```json
+"host_permissions": [
+  "https://api.openai.com/*",
+  "https://generativelanguage.googleapis.com/*",
+  "https://api-free.deepl.com/*"
+]
+```
+
+**候補 API**
+
+| API | 料金 | 特徴 |
+| --- | --- | --- |
+| [DeepL API Free](https://www.deepl.com/pro-api) | 月50万字まで無料 | 高精度。APIキー必要 |
+| [Google Gemini API](https://ai.google.dev/) | 無料枠あり | 文脈を考慮した翻訳が可能。APIキー必要 |
+| [OpenAI API](https://platform.openai.com/) | 従量課金 | GPT-4o-mini で安価に高品質な翻訳 |
+
+**実装時の注意点**
+
+- 字幕は短い断片（1〜2文）で頻繁に届くため、翻訳リクエストのデバウンス（200〜300ms）が必要
+- 翻訳結果が字幕より遅れて届くことがあるため、対応する元テキストと紐付けて表示する（`ts` を利用）
+- Chrome 拡張機能では `fetch()` による外部 API 呼び出しは Service Worker（background.js）経由で行う方が CORS 問題を回避しやすい
+
 ## chrome.storage.sync のキー
 
 | キー             | 内容                                |
@@ -136,8 +202,8 @@ Apple TV+ はページ読み込み直後に `textTracks` が空の場合があ�
 
 | バージョン | 変更内容                                                                          |
 | ---------- | --------------------------------------------------------------------------------- |
-| v0.12.0    | コメント整備・README 更新（Apple TV+ 仕様・既知の課題）                           |
+| v0.12.0    | コメント整備・README 更新（Apple TV+ 仕様・既知の課題・辞書/AI翻訳実装計画）     |
 | v0.11.0    | ペアマッチング ts 方式・setStatus 整理                                            |
-| v0.10.0    | PANEL_INIT 再送フロー・キューモード実装                                            |
+| v0.10.0    | PANEL_INIT 再送フロー・キューモード実装                                           |
 | v0.9.0     | セットアップ画面廃止・未設定方式に変更。preferredLang 自動復元。履歴ペア表示      |
 | v0.8.0     | showing → hidden 方式に変更。Port 接続によるメッセージ中継                        |
