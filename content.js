@@ -1,9 +1,7 @@
-// v0.10.1
+// v0.11.0
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・送信
 
 (function () {
-  // ctLog はコンソールのみに出力する。
-  // background.js への DEBUG_LOG 送信は行わない（bgLog がパネルへブロードキャストするため不要）。
   function ctLog(msg) {
     console.log(`[CT ${new Date().toISOString()}] ${msg}`);
   }
@@ -56,7 +54,7 @@
   }
 
   function activateTrack(track) {
-    ctLog(`activateTrack lang=${track.language} mode=${track.mode} cues=${track.cues?.length ?? 'null'}`);
+    ctLog(`activateTrack lang=${track.language} mode=${track.mode} cues=${track.cues?.length ?? "null"}`);
     if (track.cues && track.cues.length > 0) {
       track.mode = "hidden";
       ctLog(`activateTrack → cuesあり hidden のまま`);
@@ -74,7 +72,7 @@
   }
 
   function assignTrack(slot, track) {
-    ctLog(`assignTrack slot=${slot} lang=${track.language} mode=${track.mode} cues=${track.cues?.length ?? 'null'}`);
+    ctLog(`assignTrack slot=${slot} lang=${track.language}`);
     const prev = activeSlots[slot];
     if (prev && prev !== track) {
       detachCueListener(prev);
@@ -122,12 +120,16 @@
     return [...seen.values()];
   }
 
-  // addtrack イベントを 300ms デバウンスして連続送信を防ぐ
+  // トラックが1件以上確定してから送信する。count=0 は送らない。
   let tracksListTimer = null;
   function sendTracksList(video) {
     clearTimeout(tracksListTimer);
     tracksListTimer = setTimeout(() => {
       const tracks = getValidTracks(video);
+      if (tracks.length === 0) {
+        ctLog("TRACKS_LIST スキップ (count=0)");
+        return;
+      }
       ctLog(`TRACKS_LIST 送信 count=${tracks.length}`);
       safeSend({
         type: "TRACKS_LIST",
@@ -142,14 +144,46 @@
   }
 
   chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type !== "SELECT_TRACK") return;
-    const video = document.querySelector("video");
-    if (!video) return;
-    const track = getValidTracks(video)[msg.trackIndex];
-    if (!track) return;
-    ctLog(`SELECT_TRACK 受信 slot=${msg.slot} trackIndex=${msg.trackIndex}`);
-    assignTrack(msg.slot, track);
-    chrome.storage.sync.set({ [`preferredLang${msg.slot}`]: track.language });
+    if (msg.type === "SELECT_TRACK") {
+      const video = document.querySelector("video");
+      if (!video) return;
+      const track = getValidTracks(video)[msg.trackIndex];
+      if (!track) return;
+      ctLog(`SELECT_TRACK 受信 slot=${msg.slot} trackIndex=${msg.trackIndex}`);
+      assignTrack(msg.slot, track);
+      chrome.storage.sync.set({ [`preferredLang${msg.slot}`]: track.language });
+      return;
+    }
+
+    // パネルが再オープンされるたびに PANEL_INIT が届く。
+    // すでにトラックが割り当て済みなら現在の状態を再送する。
+    if (msg.type === "PANEL_INIT") {
+      const video = document.querySelector("video");
+      if (!video) return;
+      ctLog("PANEL_INIT 受信: 現在の状態を再送");
+      sendTracksList(video);
+
+      // 割り当て済みスロットがあれば TRACK_ATTACHED を再送してスロット選択を復元する
+      const hasAttached = Object.values(activeSlots).some((t) => t !== null);
+      if (hasAttached) {
+        ["A", "B"].forEach((slot) => {
+          const track = activeSlots[slot];
+          if (!track) return;
+          safeSend({
+            type: "TRACK_ATTACHED",
+            slot,
+            lang: track.language,
+            label: formatLabel(track),
+          });
+        });
+        safeSend({ type: "READY" });
+        ctLog("PANEL_INIT: 再送完了 (READY 送信)");
+      } else {
+        // まだ割り当てがなければ通常の初期化を実行する
+        initTracks(video);
+      }
+      return;
+    }
   });
 
   function initTracks(video) {
@@ -158,18 +192,16 @@
     chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (result) => {
       const langA = result.preferredLangA || "en";
       const langB = result.preferredLangB || "ja";
-      ctLog(`initTracks langA=${langA} langB=${langB}`);
       const trackA = validTracks.find(
         (t) => t.language === langA && t.kind !== "captions",
       );
       const trackB = validTracks.find(
         (t) => t.language === langB && t.kind !== "captions",
       );
-      ctLog(`initTracks trackA=${trackA?.language ?? 'none'} trackB=${trackB?.language ?? 'none'}`);
+      ctLog(`initTracks trackA=${trackA?.language ?? "none"} trackB=${trackB?.language ?? "none"}`);
       if (trackA) assignTrack("A", trackA);
       if (trackB) assignTrack("B", trackB);
 
-      // トラック割り当て完了を sidepanel に通知（ステータスバー更新用）
       safeSend({ type: "READY" });
       ctLog("READY 送信");
     });
