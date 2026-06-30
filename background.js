@@ -1,4 +1,4 @@
-// v0.12.0
+// v0.13.4
 // 役割: content.js ↔ sidepanel.js の双方向メッセージ中継（タブ単位ルーティング）
 //
 // アーキテクチャ:
@@ -8,22 +8,33 @@
 // タブIDをキーに tabPorts Map でポート管理。
 // パネルが閉じている間に届いたメッセージはキューに蓄積し、
 // 再オープン時（PANEL_INIT）に一括送出する。
+//
+// v0.13.4 変更:
+//   - CT_LOG 専用キュー（上限 CT_LOG_QUEUE_LIMIT 件）を追加。
+//     ポートがある時は即転送、ない時は専用キューに積み再オープン時に送出する。
+//     通常キュー（SUBTITLE_CUE 等）とは独立して管理する。
+//   - キューに積む際に msg.type をログ出力するよう変更。
+//   - port.postMessage 失敗時に catch で e.message をログ出力するよう変更。
 
 function bgLog(msg) {
   const line = `[BG ${new Date().toISOString()}] ${msg}`;
   console.log(line);
   for (const [, entry] of tabPorts) {
     if (entry.port) {
-      try { entry.port.postMessage({ type: "DEBUG_LOG", line }); } catch (_) {}
+      try { entry.port.postMessage({ type: "DEBUG_LOG", line }); } catch (e) {
+        console.error(`[BG] bgLog postMessage失敗: ${e.message}`);
+      }
     }
   }
 }
 
-// tabId → { port, queue }
-// port: 現在接続中の sidepanel Port（閉じると null）
-// queue: panel 未接続中に受信したメッセージのバックログ
+// tabId → { port, queue, ctLogQueue }
+// port:       現在接続中の sidepanel Port（閉じると null）
+// queue:      panel 未接続中に受信した通常メッセージのバックログ
+// ctLogQueue: panel 未接続中に受信した CT_LOG のバックログ（専用・独立管理）
 const tabPorts = new Map();
-const QUEUE_LIMIT = 50; // キュー上限（溢れたメッセージは破棄）
+const QUEUE_LIMIT = 50;         // 通常キュー上限（溢れたメッセージは破棄）
+const CT_LOG_QUEUE_LIMIT = 20;  // CT_LOG 専用キュー上限
 
 // --- sidepanel.js からの接続 ---
 chrome.runtime.onConnect.addListener((port) => {
@@ -36,18 +47,31 @@ chrome.runtime.onConnect.addListener((port) => {
       // sidepanel が開いた（または再オープンした）タイミングで呼ばれる
       boundTabId = msg.tabId;
       if (!tabPorts.has(boundTabId)) {
-        tabPorts.set(boundTabId, { port, queue: [] });
+        tabPorts.set(boundTabId, { port, queue: [], ctLogQueue: [] });
       } else {
         tabPorts.get(boundTabId).port = port;
       }
-      bgLog(`PANEL_INIT tabId=${boundTabId}`);
 
-      // パネル不在中に溜まったメッセージをまとめて送出する
       const entry = tabPorts.get(boundTabId);
+      bgLog(`PANEL_INIT tabId=${boundTabId} queueSize=${entry.queue.length} ctLogQueueSize=${entry.ctLogQueue.length}`);
+
+      // CT_LOG 専用キューを先に送出する（時系列を保つため）
+      if (entry.ctLogQueue.length > 0) {
+        bgLog(`CT_LOG キュー送出 ${entry.ctLogQueue.length} 件 tabId=${boundTabId}`);
+        while (entry.ctLogQueue.length) {
+          try { port.postMessage(entry.ctLogQueue.shift()); } catch (e) {
+            bgLog(`CT_LOG キュー送出失敗: ${e.message}`);
+          }
+        }
+      }
+
+      // 通常キューを送出する
       if (entry.queue.length > 0) {
         bgLog(`キュー送出 ${entry.queue.length} 件 tabId=${boundTabId}`);
         while (entry.queue.length) {
-          try { port.postMessage(entry.queue.shift()); } catch (_) {}
+          try { port.postMessage(entry.queue.shift()); } catch (e) {
+            bgLog(`キュー送出失敗: ${e.message}`);
+          }
         }
       }
 
@@ -81,6 +105,29 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   const tabId = sender.tab?.id;
   if (!tabId) return;
 
+  // CT_LOG は専用キューで別管理する
+  if (msg.type === "CT_LOG") {
+    const entry = tabPorts.get(tabId);
+    if (entry) {
+      if (entry.port) {
+        // ポートがある時は即転送（キューには積まない）
+        try { entry.port.postMessage(msg); } catch (e) {
+          bgLog(`CT_LOG postMessage失敗: ${e.message}`);
+        }
+      } else {
+        // ポートがない時は専用キューに積む
+        if (entry.ctLogQueue.length < CT_LOG_QUEUE_LIMIT) {
+          entry.ctLogQueue.push(msg);
+        }
+        // 溢れた分は静かに破棄（ログ自体のログは出さない）
+      }
+    } else {
+      // 初回受信：エントリを新規作成して専用キューに積む
+      tabPorts.set(tabId, { port: null, queue: [], ctLogQueue: [msg] });
+    }
+    return;
+  }
+
   // 処理対象メッセージ種別のみ受け付ける
   if (![
     "SUBTITLE_CUE",   // 字幕テキスト
@@ -102,16 +149,22 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   if (entry) {
     if (entry.port) {
       // パネルが開いていれば直接送信する
-      try { entry.port.postMessage(msg); } catch (_) {}
+      try { entry.port.postMessage(msg); } catch (e) {
+        bgLog(`postMessage失敗 type=${msg.type}: ${e.message}`);
+      }
     } else {
       // パネルが閉じていればキューに積む
-      if (entry.queue.length < QUEUE_LIMIT) entry.queue.push(msg);
-      bgLog(`queued (${entry.queue.length}/${QUEUE_LIMIT}) tabId=${tabId}`);
+      if (entry.queue.length < QUEUE_LIMIT) {
+        entry.queue.push(msg);
+        bgLog(`queued type=${msg.type} (${entry.queue.length}/${QUEUE_LIMIT}) tabId=${tabId}`);
+      } else {
+        bgLog(`queue FULL 破棄 type=${msg.type} tabId=${tabId}`);
+      }
     }
   } else {
     // 初回受信：エントリを新規作成してキューに積む
-    bgLog(`new entry + queued tabId=${tabId}`);
-    tabPorts.set(tabId, { port: null, queue: [msg] });
+    bgLog(`new entry + queued type=${msg.type} tabId=${tabId}`);
+    tabPorts.set(tabId, { port: null, queue: [msg], ctLogQueue: [] });
   }
 });
 

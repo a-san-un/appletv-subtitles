@@ -1,4 +1,4 @@
-// v0.13.2
+// v0.13.4
 // 役割: サイドパネルの UI 制御・メッセージ受信・履歴表示
 //
 // 主な処理:
@@ -12,6 +12,10 @@
 //   - TRACK_ATTACHED 受信時に currentTracks が空の場合でも lang を pendingAttached に保存し、
 //     後続の TRACKS_LIST 受信時にセレクトボックスへ正しく反映する。
 //     これにより再オープン時に意図しない言語（前回 storage に残った値）が選ばれるバグを修正。
+//
+// v0.13.4 変更:
+//   - populateSelects: pendingAttached / prefKey / langToUse / match 結果をログ出力。
+//   - addHistory: diff 値・ペア成立 or 単独追加 or タイムアウトをログ出力。
 
 // Port 接続を最初に確立する（background.js がメッセージを転送する）
 const port = chrome.runtime.connect({ name: "subtitle-panel" });
@@ -122,7 +126,9 @@ function populateSelects(tracks) {
   if (tracks.length === 0) return;
   currentTracks = tracks;
   panelLog(`TRACKS_LIST 受信 count=${tracks.length}`);
+  panelLog(`populateSelects: pendingA=${pendingAttached.A ?? "null"} pendingB=${pendingAttached.B ?? "null"}`);
   chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (prefs) => {
+    panelLog(`populateSelects: prefA=${prefs.preferredLangA ?? "null"} prefB=${prefs.preferredLangB ?? "null"}`);
     [
       { sel: selectA, slot: "A", prefKey: prefs.preferredLangA },
       { sel: selectB, slot: "B", prefKey: prefs.preferredLangB },
@@ -137,12 +143,11 @@ function populateSelects(tracks) {
 
       // pendingAttached を最優先で使う（再オープン時に content.js の実態を反映）
       const langToUse = pendingAttached[slot] ?? prefKey;
-      if (langToUse) {
-        const match = tracks.find(
-          (t) => t.language === langToUse && !t.label.includes("CC"),
-        );
-        if (match) { sel.value = match.index; return; }
-      }
+      const match = langToUse
+        ? tracks.find((t) => t.language === langToUse && !t.label.includes("CC"))
+        : null;
+      panelLog(`populateSelects slot=${slot} langToUse=${langToUse ?? "null"} match=${match?.language ?? "none"}`);
+      if (match) sel.value = match.index;
     });
   });
 }
@@ -189,9 +194,13 @@ function flushPair(slotA, slotB) {
 function addHistory(slot, text, ts) {
   const other = slot === "A" ? "B" : "A";
 
+  panelLog(`addHistory slot=${slot} ts=${ts} bufferOther=${pairBuffer[other]?.ts ?? "none"}`);
+
   if (pairBuffer[other]) {
-    if (Math.abs(ts - pairBuffer[other].ts) <= PAIR_MATCH_MS) {
+    const diff = Math.abs(ts - pairBuffer[other].ts);
+    if (diff <= PAIR_MATCH_MS) {
       // ペア成立：タイマーをキャンセルしてまとめて追加する
+      panelLog(`addHistory ペア成立 diff=${diff}ms slot=${slot}+${other}`);
       clearTimeout(pairBuffer[other].timer);
       const textA_ = slot === "A" ? text : pairBuffer[other].text;
       const textB_ = slot === "B" ? text : pairBuffer[other].text;
@@ -200,6 +209,7 @@ function addHistory(slot, text, ts) {
       return;
     }
     // ts 差が大きい → 相手を単独追加してバッファをリセットする
+    panelLog(`addHistory diff=${diff}ms > PAIR_MATCH_MS → ${other} 単独追加`);
     clearTimeout(pairBuffer[other].timer);
     flushPair(
       other === "A" ? pairBuffer[other].text : undefined,
@@ -211,6 +221,7 @@ function addHistory(slot, text, ts) {
   // バッファに登録。PAIR_TIMEOUT_MS 後に相手が来なければ単独追加する。
   const timer = setTimeout(() => {
     if (!pairBuffer[slot]) return;
+    panelLog(`addHistory TIMEOUT slot=${slot} → 単独追加`);
     flushPair(
       slot === "A" ? pairBuffer[slot].text : undefined,
       slot === "B" ? pairBuffer[slot].text : undefined,
