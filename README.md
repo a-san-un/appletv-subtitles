@@ -75,6 +75,7 @@ Apple TV+ のページに inject されるスクリプト。
 - 字幕をリアルタイムに表示 + 履歴リストに追加
 - 履歴は A・B のペア表示（`ts` 差が `PAIR_MATCH_MS` 以内ならペア化）
 - `CT_LOG` / `DEBUG_LOG` を同一の DEBUG LOG エリアに表示（v0.13.1〜）
+- `TRACK_ATTACHED` 受信時に `pendingAttached` へ lang を保存し、後続の `TRACKS_LIST` 再生成時に優先適用（v0.13.2〜）
 
 ## Apple TV+ の字幕仕様
 
@@ -118,6 +119,34 @@ Apple TV+ はページ読み込み直後に `textTracks` が空の場合があ�
 | `disabled` トラックの cues | ロードされない（`showing` が必要） |
 
 ## テスト方法
+
+### v0.13.2：パネル再オープン時の言語復元バグ修正
+
+#### テスト条件
+
+| 条件 | 内容 |
+| --- | --- |
+| ブラウザ | Chrome 114 以上（Side Panel API 対応） |
+| 対象サイト | `https://tv.apple.com/` の動画再生ページ |
+| 日本語字幕 | 対象作品に `ja` トラックが存在すること |
+| 拡張機能 | unpacked で読み込み済み（`chrome://extensions/` でリロード済み） |
+
+#### 手順
+
+1. `chrome://extensions/` で拡張機能をリロードする。
+2. Apple TV+ の動画再生ページを開き、サイドパネルを開く。
+3. スロット A=英語（`en`）、スロット B=日本語（`ja`）が正しく表示されることを確認する。
+4. サイドパネルを **一度閉じて再度開く**。
+
+#### 確認ポイント
+
+| 確認項目 | 期待する結果 | NG の場合 |
+| --- | --- | --- |
+| 再オープン後のスロット A | `en`（英語）が選択されている | `pendingAttached` が適用されず、前回 storage に残った別言語になる |
+| 再オープン後のスロット B | `ja`（日本語）が選択されている | 同上 |
+| 字幕が再開する | 再オープン後も字幕が流れ続ける | TRACKS_LIST / TRACK_ATTACHED の再送が機能していない |
+
+---
 
 ### v0.13.1：content.js ログのサイドパネル転送
 
@@ -258,9 +287,62 @@ Apple TV+ に日本語字幕トラックがない作品でも対訳を見られ�
 
 | バージョン | 変更内容                                                                          |
 | ---------- | --------------------------------------------------------------------------------- |
+| v0.13.2    | TRACK_ATTACHED の lang を pendingAttached に保存し TRACKS_LIST 再生成時に優先適用。再オープン時の言語復元バグ修正 |
 | v0.13.1    | content.js の ctLog を CT_LOG でサイドパネルの DEBUG LOG に転送                  |
 | v0.12.0    | コメント整備・README 更新（Apple TV+ 仕様・既知の課題・辞書/AI翻訳実装計画）     |
 | v0.11.0    | ペアマッチング ts 方式・setStatus 整理                                            |
 | v0.10.0    | PANEL_INIT 再送フロー・キューモード実装                                           |
 | v0.9.0     | セットアップ画面廃止・未設定方式に変更。preferredLang 自動復元。履歴ペア表示      |
 | v0.8.0     | showing → hidden 方式に変更。Port 接続によるメッセージ中継                        |
+
+---
+
+## 新スレッドへの引き継ぎ
+
+新しいスレッドでこのプロジェクトの作業を再開する場合は、以下をそのままコピーして冒頭に貼ってください。
+
+```
+以下のChrome拡張機能プロジェクトの作業を続けています。
+
+## プロジェクト概要
+リポジトリ: https://github.com/a-san-un/appletv-subtitles
+Apple TV+ の動画再生中に2言語の字幕をサイドパネルに並べて表示するChrome拡張機能です。
+
+## 現在のバージョン: v0.13.2
+
+## ファイル構成
+- manifest.json：パーミッション設定（storage / sidePanel / tabs）
+- background.js：Service Worker。content.js ↔ sidepanel.js のメッセージ中継・キュー管理
+- content.js：Apple TV+ ページに inject。textTracks 監視・cuechange 取得・SUBTITLE_CUE 送信
+- sidepanel.html / sidepanel.js / sidepanel.css：サイドパネルUI。ペアマッチング・履歴表示・DEBUG LOG
+
+## メッセージフロー
+content.js → runtime.sendMessage → background.js → port.postMessage → sidepanel.js
+PANEL_INIT（sidepanel → bg → content）：パネル起動時の登録と状態再送トリガー
+
+## 主なメッセージ種別
+TRACKS_LIST / TRACK_ATTACHED / READY / SUBTITLE_CUE / SELECT_TRACK / CT_LOG
+
+## 重要な実装ポイント
+- showing → hidden 方式：cues をロードするためトラックを一時 showing にする（約1秒後に hidden へ）
+- ペアマッチング：A・B の ts 差が PAIR_MATCH_MS（300ms）以内ならペア化、超過は PAIR_TIMEOUT_MS（500ms）後に単独追加
+- pendingAttached：TRACK_ATTACHED 受信時に lang を保存し、後続の TRACKS_LIST 再生成時に preferredLang より優先適用（再オープン時の言語復元用）
+- キューモード：サイドパネルが閉じている間のメッセージを最大50件蓄積し、再オープン時に一括送出
+- forced 字幕除外：kind === 'forced' のトラックは一覧・自動割り当てから除外
+- シーク後再ロード：seeked イベントで cues が空のスロットのみ activateTrack を再実行
+
+## chrome.storage.sync のキー
+- preferredLangA：スロットAの言語コード（例: "en"）
+- preferredLangB：スロットBの言語コード（例: "ja"）
+
+## 実装予定の機能
+1. 辞書機能：mouseup/selectionchange で選択単語を取得し Free Dictionary API などへリクエスト。ポップアップ表示
+2. AI翻訳機能：SUBTITLE_CUE 受信時に翻訳APIを呼び出し、結果を履歴ペアに追加。DeepL / Gemini / OpenAI が候補
+
+## 既知の課題
+1. PAIR_TIMEOUT_MS / PAIR_MATCH_MS の調整
+2. forced 字幕の稀な混入
+3. activateTrack の showing 中に字幕が一瞬画面表示される可能性
+
+詳細は README を参照してください: https://github.com/a-san-un/appletv-subtitles/blob/main/README.md
+```
