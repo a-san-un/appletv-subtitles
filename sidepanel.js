@@ -1,4 +1,4 @@
-// v0.10.0
+// v0.10.1
 
 // Port 接続を最初に確立する
 // （PANEL_INIT の送信は chrome.tabs.query のコールバック内で行うが、
@@ -68,10 +68,27 @@ const historyEl = document.getElementById("history-list");
 const selectA = document.getElementById("select-a");
 const selectB = document.getElementById("select-b");
 
-// ステータスバー要素（存在する場合のみ更新）
-const statusEl = document.getElementById("status");
-function setStatus(text) {
-  if (statusEl) statusEl.textContent = text;
+// ステータスバー要素
+// HTML側の id="status-text" / id="status-dot" に小小客
+const statusTextEl = document.getElementById("status-text");
+const statusDotEl  = document.getElementById("status-dot");
+
+/**
+ * @param {"connecting"|"ready"|"waiting"} state
+ * @param {string} [label] - 省略時はデフォルト文言語を使用
+ */
+function setStatus(state, label) {
+  const labels = {
+    connecting: "起動中...",
+    ready:      "接続済み",
+    waiting:    "待機中...",
+  };
+  const text = label ?? labels[state] ?? state;
+  if (statusTextEl) statusTextEl.textContent = text;
+  if (statusDotEl) {
+    statusDotEl.classList.remove("dot-connecting", "dot-ready", "dot-waiting");
+    statusDotEl.classList.add(`dot-${state}`);
+  }
 }
 
 function populateSelects(tracks) {
@@ -146,7 +163,7 @@ function handleMessage(msg) {
   }
   if (msg.type === "READY") {
     panelLog("READY 受信: content.js トラック割り当て完了");
-    setStatus("接続済み");
+    setStatus("ready");
     return;
   }
   if (msg.type === "SUBTITLE_CUE") {
@@ -196,4 +213,8 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   pendingPair = {};
   textA.textContent = "— 待機中 —";
   textB.textContent = "— 待機中 —";
+  // 履歴クリア後は待機中に戻す（READY は再割り当てまで起動中に戻るので「接続済み」のまま）
+  setStatus("waiting");
+  // 実際には接続は維持されているのですぐ「接続済み」に戻す
+  setStatus("ready");
 });

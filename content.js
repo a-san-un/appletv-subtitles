@@ -1,11 +1,11 @@
-// v0.10.0
+// v0.10.1
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・送信
 
 (function () {
+  // ctLog はコンソールのみに出力する。
+  // background.js への DEBUG_LOG 送信は行わない（bgLog がパネルへブロードキャストするため不要）。
   function ctLog(msg) {
-    const line = `[CT ${new Date().toISOString()}] ${msg}`;
-    console.log(line);
-    try { chrome.runtime.sendMessage({ type: "DEBUG_LOG", line }); } catch (_) {}
+    console.log(`[CT ${new Date().toISOString()}] ${msg}`);
   }
 
   function safeSend(msg) {
@@ -63,8 +63,6 @@
       return;
     }
     if (track.mode === "disabled") track.mode = "hidden";
-    // showing パルス中は addtrack イベントが発火しうるが
-    // sendTracksList のデバウンスで吸収されるため問題ない
     setTimeout(() => {
       ctLog(`activateTrack → pulse showing lang=${track.language}`);
       track.mode = "showing";
@@ -182,7 +180,6 @@
     sendTracksList(video);
     initTracks(video);
     video.addEventListener("seeked", reloadAfterSeek);
-    // addtrack は頻繁に発火するためデバウンス版を使う
     video.textTracks.addEventListener("addtrack", () => sendTracksList(video));
   }
 

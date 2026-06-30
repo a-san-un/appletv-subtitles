@@ -1,10 +1,10 @@
-// v0.10.0
+// v0.10.1
 // 役割: content.js ↔ sidepanel.js の双方向メッセージ中継（タブ単位ルーティング）
 
 function bgLog(msg) {
   const line = `[BG ${new Date().toISOString()}] ${msg}`;
   console.log(line);
-  // Service Worker 内のログを全ポートにブロードキャスト
+  // Service Worker 内のログを接続中の全ポートにブロードキャスト
   for (const [, entry] of tabPorts) {
     if (entry.port) {
       try { entry.port.postMessage({ type: "DEBUG_LOG", line }); } catch (_) {}
@@ -15,7 +15,7 @@ function bgLog(msg) {
 // tabId → { port: MessagePort|null, queue: Array }
 const tabPorts = new Map();
 
-const QUEUE_LIMIT = 50; // キュー上限（TRACKS_LIST 大量発生に備えて余裕を持たせる）
+const QUEUE_LIMIT = 50;
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "subtitle-panel") return;
@@ -28,6 +28,7 @@ chrome.runtime.onConnect.addListener((port) => {
       if (!tabPorts.has(boundTabId)) {
         tabPorts.set(boundTabId, { port, queue: [] });
       } else {
+        // 再接続時はポートのみ入れ替え（queue は履歴を保持）
         tabPorts.get(boundTabId).port = port;
       }
       bgLog(`PANEL_INIT tabId=${boundTabId}`);
@@ -51,7 +52,11 @@ chrome.runtime.onConnect.addListener((port) => {
 
   port.onDisconnect.addListener(() => {
     bgLog(`port disconnected tabId=${boundTabId}`);
-    if (boundTabId) tabPorts.delete(boundTabId);
+    if (boundTabId && tabPorts.has(boundTabId)) {
+      // エントリ自体は残す（キューを消さない）。ポートのみ null でクリア。
+      // パネルを開き直した際にキュー済メッセージを再配信できる。
+      tabPorts.get(boundTabId).port = null;
+    }
   });
 });
 
@@ -67,7 +72,6 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     "READY",
   ].includes(msg.type)) return;
 
-  // TRACKS_LIST は件数のみ簡潔にログ（デバウンス後は1回なのでそのまま記録）
   if (msg.type === "SUBTITLE_CUE") {
     bgLog(`SUBTITLE_CUE slot=${msg.slot} lang=${msg.lang} tabId=${tabId}`);
   } else if (msg.type === "TRACKS_LIST") {
@@ -81,14 +85,13 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     if (entry.port) {
       try { entry.port.postMessage(msg); } catch (_) {}
     } else {
-      // Port 未確立（Panel が PANEL_INIT をまだ送っていない）→ キューへ
+      // Port 未確立 → キューへ
       if (entry.queue.length < QUEUE_LIMIT) {
         entry.queue.push(msg);
       }
       bgLog(`queued (${entry.queue.length}/${QUEUE_LIMIT}) tabId=${tabId}`);
     }
   } else {
-    // tabPorts エントリ自体がない → 初回受信、エントリ作成してキューへ
     bgLog(`new entry + queued tabId=${tabId}`);
     tabPorts.set(tabId, { port: null, queue: [msg] });
   }
