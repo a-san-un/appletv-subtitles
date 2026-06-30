@@ -1,4 +1,4 @@
-// v0.13.4
+// v0.14.1
 // 役割: サイドパネルの UI 制御・メッセージ受信・履歴表示
 //
 // 主な処理:
@@ -16,10 +16,24 @@
 // v0.13.4 変更:
 //   - populateSelects: pendingAttached / prefKey / langToUse / match 結果をログ出力。
 //   - addHistory: diff 値・ペア成立 or 単独追加 or タイムアウトをログ出力。
+//
+// v0.14.1 変更:
+//   - port.onDisconnect を追加。Service Worker のスリープ等で接続が切断した際に
+//     ステータスを「接続が切れました」表示に更新し、セレクトボックスを無効化する。
 
 // Port 接続を最初に確立する（background.js がメッセージを転送する）
 const port = chrome.runtime.connect({ name: "subtitle-panel" });
 port.onMessage.addListener((msg) => handleMessage(msg));
+
+// ★ Service Worker のスリープ・クラッシュ等で接続が切断したときに UI を更新する。
+// setStatus / selectA / selectB は後述で定義されるため、
+// このリスナーは実际に切断するまで呼ばれない。
+port.onDisconnect.addListener(() => {
+  panelLog("バックグラウンドとの接続が切断されました");
+  setStatus("waiting", "接続が切れました。ページをリロードしてください");
+  if (selectA) selectA.disabled = true;
+  if (selectB) selectB.disabled = true;
+});
 
 // ログ機構（画面内デバッグ表示 + コピー・保存機能）
 const logLines = [];
@@ -127,6 +141,11 @@ function populateSelects(tracks) {
   currentTracks = tracks;
   panelLog(`TRACKS_LIST 受信 count=${tracks.length}`);
   panelLog(`populateSelects: pendingA=${pendingAttached.A ?? "null"} pendingB=${pendingAttached.B ?? "null"}`);
+
+  // ★ 接続復帰した場合はセレクトボックスを再有効化する
+  if (selectA) selectA.disabled = false;
+  if (selectB) selectB.disabled = false;
+
   chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (prefs) => {
     panelLog(`populateSelects: prefA=${prefs.preferredLangA ?? "null"} prefB=${prefs.preferredLangB ?? "null"}`);
     [
@@ -292,7 +311,7 @@ document.getElementById("btn-clear").addEventListener("click", () => {
   historyEl.innerHTML = "";
   Object.values(pairBuffer).forEach((b) => clearTimeout(b.timer));
   Object.keys(pairBuffer).forEach((k) => delete pairBuffer[k]);
-  textA.textContent = "— 待機中 —";
-  textB.textContent = "— 待機中 —";
+  textA.textContent = "\u2014 待機中 —";
+  textB.textContent = "\u2014 待機中 —";
   setStatus("ready");
 });

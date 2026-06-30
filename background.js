@@ -1,4 +1,4 @@
-// v0.13.4
+// v0.14.1
 // 役割: content.js ↔ sidepanel.js の双方向メッセージ中継（タブ単位ルーティング）
 //
 // アーキテクチャ:
@@ -15,6 +15,10 @@
 //     通常キュー（SUBTITLE_CUE 等）とは独立して管理する。
 //   - キューに積む際に msg.type をログ出力するよう変更。
 //   - port.postMessage 失敗時に catch で e.message をログ出力するよう変更。
+//
+// v0.14.1 変更:
+//   - chrome.tabs.onRemoved を追加。タブが閉じられた際に tabPorts から
+//     該当エントリを削除しメモリリークを防止する。
 
 function bgLog(msg) {
   const line = `[BG ${new Date().toISOString()}] ${msg}`;
@@ -165,6 +169,16 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     // 初回受信：エントリを新規作成してキューに積む
     bgLog(`new entry + queued type=${msg.type} tabId=${tabId}`);
     tabPorts.set(tabId, { port: null, queue: [msg], ctLogQueue: [] });
+  }
+});
+
+// --- タブ閉じた時のクリーンアップ ---
+// ★ Apple TV+ のタブが閉じられた際に tabPorts からエントリを削除する。
+// これがないと長時間使用時に不要なキュー・ポート情報が湎積しメモリリークになる。
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabPorts.has(tabId)) {
+    bgLog(`タブ閉鎖検知: tabId=${tabId} の tabPorts エントリを削除`);
+    tabPorts.delete(tabId);
   }
 });
 
