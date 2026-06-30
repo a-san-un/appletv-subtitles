@@ -1,16 +1,11 @@
-// v0.9.2
+// v0.9.3
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・送信
 //
-// [v0.9.2 変更点]
-// - スロットに割り当てたトラックは常に hidden で運用する
-//   → hidden でも cuechange は発火する。disabled のときのみ発火しない
-//   → 画面字幕 on/off に関わらずサイドパネルに常に表示される
-//   → ユーザーが画面字幕を showing にしていても、拡張機能側は hidden に落とす
-//     (画面字幕は Apple TV+ のネイティブUIで別途制御することを前提とする)
-// - showing パルスは disabled → hidden に昇格する場合のみ使用する
-//   → cues の初回ロードに必要。パルス後は常に hidden に戻す
-// - reloadAfterSeek() も同様に disabled のトラックのみパルスする
-// - originalModeMap を削除（不要になったため）
+// [v0.9.3 変更点]
+// - activateTrack(): パルス条件を disabled 判定 → cues が空っぽ判定に変更
+//   → hidden でも cues が未ロードならパルスが必要。以前は disabled のみパルスしていたため
+//   hidden+cues空のトラック（日本語等）が初回起動時に表示されない問題を修正
+// - パルス後は常に hidden に戻す（v0.9.2の方針を維持）
 
 (function () {
   function safeSend(msg) {
@@ -59,23 +54,23 @@
     }
   }
 
-  // disabled のトラックに対して showing パルスを打って cues をロードさせ、
-  // パルス後は常に hidden に戻す。
-  // hidden / showing のトラックはそのまま hidden に落とすだけで良い。
+  // トラックをスロット用に有効化する。
+  // スロットに割り当てたトラックは常に hidden で運用する。
+  // cues が空の場合のみ showing パルスで cues をロードさせ、パルス後は hidden に戻す。
   function activateTrack(track) {
-    if (track.mode === "disabled") {
-      // disabled → hidden に昇格したうえでパルス
+    // cues がすでにある場合: 属性を少し変えるだけで cuechange は自然に発火する
+    if (track.cues && track.cues.length > 0) {
       track.mode = "hidden";
-      setTimeout(() => {
-        track.mode = "showing";
-        setTimeout(() => {
-          track.mode = "hidden";
-        }, 1000);
-      }, 300);
-    } else {
-      // hidden または showing → 常に hidden に落とす
-      track.mode = "hidden";
+      return;
     }
+    // cues が空: disabled だとロードされないのでまず hidden に昇格してからパルス
+    if (track.mode === "disabled") track.mode = "hidden";
+    setTimeout(() => {
+      track.mode = "showing";
+      setTimeout(() => {
+        track.mode = "hidden";
+      }, 1000);
+    }, 300);
   }
 
   function assignTrack(slot, track) {
@@ -85,7 +80,6 @@
       const usedByOther = Object.entries(activeSlots).some(
         ([s, t]) => s !== slot && t === prev,
       );
-      // 他のスロットで使っていなければ disabled に戻す
       if (!usedByOther) prev.mode = "disabled";
     }
 
@@ -105,8 +99,8 @@
     ["A", "B"].forEach((slot) => {
       const track = activeSlots[slot];
       if (!track) return;
-      // シーク後に disabled に落ちている場合のみ再起動
-      if (track.mode === "disabled") {
+      // シーク後に cues が空になった場合だけ再起動
+      if (!track.cues || track.cues.length === 0) {
         activateTrack(track);
       }
     });
