@@ -38,6 +38,9 @@ content.js  →  runtime.sendMessage  →  background.js
 sidepanel.js  ←  port.postMessage  ←  background.js
 ```
 
+サイドパネルが閉じている間に受信したメッセージはキュー（最大50件）に蓄積し、
+再オープン時（`PANEL_INIT`）に一括送出する。
+
 ### content.js
 
 Apple TV+ のページに inject されるスクリプト。
@@ -45,32 +48,71 @@ Apple TV+ のページに inject されるスクリプト。
 - `video.textTracks` を監視してトラック一覧を送信（`TRACKS_LIST`）
 - `chrome.storage.sync` から `preferredLangA` / `preferredLangB` を読み込み自動割り当て
 - 割り当てたトラックを `showing → hidden` 方式で監視し `cuechange` イベントを捕捉
-- 字幕テキストを `SUBTITLE_CUE` として送信
-- シーク後にトラックを再ロード
+- 字幕テキストを `SUBTITLE_CUE` として送信（`ts` でペアマッチング用タイムスタンプ付き）
+- シーク後に cues が空になったトラックを再ロード
+- `PANEL_INIT` 受信時は現在の状態（`TRACKS_LIST` / `TRACK_ATTACHED` / `READY`）を再送
 
 ### background.js が中継するメッセージ一覧
 
-| メッセージ       | 方向                | 内容                             |
-| ---------------- | ------------------- | -------------------------------- |
-| `TRACKS_LIST`    | content → sidepanel | 有効な字幕トラック一覧           |
-| `SUBTITLE_CUE`   | content → sidepanel | 字幕テキスト（slot, lang, text） |
-| `TRACK_ATTACHED` | content → sidepanel | トラック割り当て完了通知         |
-| `SELECT_TRACK`   | sidepanel → content | ユーザーがトラックを選択         |
+| メッセージ       | 方向                | 内容                                   |
+| ---------------- | ------------------- | -------------------------------------- |
+| `PANEL_INIT`     | sidepanel → bg → content | パネル起動・再オープン通知。bg はキューを送出し content に転送する |
+| `TRACKS_LIST`    | content → sidepanel | 有効な字幕トラック一覧                 |
+| `TRACK_ATTACHED` | content → sidepanel | トラック割り当て完了通知               |
+| `READY`          | content → sidepanel | 初期化完了通知                         |
+| `SUBTITLE_CUE`   | content → sidepanel | 字幕テキスト（slot, lang, text, ts）   |
+| `SELECT_TRACK`   | sidepanel → content | ユーザーがトラックを選択               |
 
 ### sidepanel.html / sidepanel.js / sidepanel.css
 
 サイドパネルの UI。
 
+- 起動時に `PANEL_INIT` を background.js へ送信してルーティングを登録する
 - トラックリスト受信時にセレクトボックスを自動生成
-- `preferredLang` に基づき選択肢を自動ハイライト
+- `preferredLang` に基づき選択肢を自動ハイライト（CC より subtitles を優先）
 - 字幕をリアルタイムに表示 + 履歴リストに追加
-- 履歴は A・B ペアで表示（片方のみの場合は保留バッファに待機）
+- 履歴は A・B のペア表示（`ts` 差が `PAIR_MATCH_MS` 以内ならペア化）
 
-## 字幕の取得方式
+## Apple TV+ の字幕仕様
 
-Apple TV+ の字幕は VTTCue（`cuechange` イベント）でリアルタイムに発火するため、**再生していない部分の字幕は取得できません**。字幕トラックの `.vtt` ファイルへの直接アクセスも DRM により不可。
+### 字幕の取得方式
 
-トラックを `showing` にしないと cues がロードされないため、`showing → hidden` 方式を採用しています（画面上の字幕表示には影響しません）。
+Apple TV+ の字幕は VTTCue（`cuechange` イベント）でリアルタイムに発火する。
+そのため **再生していない部分の字幕は取得できない**。`.vtt` ファイルへの直接アクセスも DRM により不可。
+
+トラックを `showing` にしないと cues がロードされないため **`showing → hidden` 方式**を採用している
+（約 1 秒後に `hidden` に戻すため、画面上の字幕表示には影響しない）。
+
+### テキストトラックの種類
+
+Apple TV+ には同一言語のトラックが複数存在することがある。
+
+| kind | 説明 | 本拡張での扱い |
+| --- | --- | --- |
+| `subtitles` | 通常の字幕 | 優先して使用 |
+| `captions` | クローズドキャプション（音声説明付き） | `subtitles` がある場合は非優先。ラベルに `CC` を付与 |
+| `forced`    | 外国語セリフのみを表示する常時字幕 | 一覧・自動割り当てから除外 |
+
+### video.textTracks の動的生成
+
+Apple TV+ はページ読み込み直後に `textTracks` が空の場合がある。
+`addtrack` イベントをリッスンして、トラックが追加されるたびに `TRACKS_LIST` を再送する（300ms デバウンス）。
+
+エピソード切替時は `<video>` 要素自体が作り直されるため、`MutationObserver` で DOM 変化を常時監視している。
+新しい `<video>` を検出したら `loadedmetadata` を待ってスロットをリセット・再初期化する。
+
+### シーク後の再ロード
+
+シーク後は `cues` が空になるトラックがある。
+`seeked` イベントを検知し、cues が空になったスロットのみ `activateTrack` を再実行して再ロードを促す。
+
+### DRM 制約まとめ
+
+| 制約 | 内容 |
+| --- | --- |
+| `.vtt` 直接取得 | 不可（DRM 保護） |
+| 過去字幕の取得 | 不可（再生済み部分は遡れない） |
+| `disabled` トラックの cues | ロードされない（`showing` が必要） |
 
 ## chrome.storage.sync のキー
 
@@ -79,14 +121,23 @@ Apple TV+ の字幕は VTTCue（`cuechange` イベント）でリアルタイム
 | `preferredLangA` | スロットAの言語コード（例: `"en"`） |
 | `preferredLangB` | スロットBの言語コード（例: `"ja"`） |
 
+> **リセット方法**: Chrome の拡張機能ページ → Service Worker コンソールで
+> `chrome.storage.sync.remove("preferredLangA")` などを実行する。
+
 ## 既知の課題
 
-- 履歴のペア表示：A と B のタイミングがずれる場合にペアが正しく組まれないことがある
-- ステータスバーが「起動中」のまま変わらない
+| # | 課題 | 状況 |
+| --- | --- | --- |
+| 1 | ペアタイムアウト値の調整 | `PAIR_TIMEOUT_MS` / `PAIR_MATCH_MS` を要調整 |
+| 2 | `forced` 字幕の混入 | 除外ロジックあり、稀にすり抜ける可能性 |
+| 3 | `pulse showing` の画面干渉 | `activateTrack` の showing 期間中に字幕が一瞬表示される可能性 |
 
 ## バージョン履歴
 
-| バージョン | 変更内容                                                                     |
-| ---------- | ---------------------------------------------------------------------------- |
-| v0.9.0     | セットアップ画面廃止・未設定方式に変更。preferredLang 自動復元。履歴ペア表示 |
-| v0.8.0     | showing → hidden 方式に変更。Port 接続によるメッセージ中継                   |
+| バージョン | 変更内容                                                                          |
+| ---------- | --------------------------------------------------------------------------------- |
+| v0.12.0    | コメント整備・README 更新（Apple TV+ 仕様・既知の課題）                           |
+| v0.11.0    | ペアマッチング ts 方式・setStatus 整理                                            |
+| v0.10.0    | PANEL_INIT 再送フロー・キューモード実装                                            |
+| v0.9.0     | セットアップ画面廃止・未設定方式に変更。preferredLang 自動復元。履歴ペア表示      |
+| v0.8.0     | showing → hidden 方式に変更。Port 接続によるメッセージ中継                        |

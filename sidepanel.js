@@ -1,10 +1,18 @@
-// v0.11.0
+// v0.12.0
+// 役割: サイドパネルの UI 制御・メッセージ受信・履歴表示
+//
+// 主な処理:
+//   - 起動時に background.js へ Port 接続し PANEL_INIT を送信する
+//   - TRACKS_LIST 受信でセレクトボックスを生成する
+//   - SUBTITLE_CUE 受信で字幕テキストを表示し、ペアマッチングして履歴に追加する
+//   - ペアマッチング: A と B の ts 差が PAIR_MATCH_MS 以内ならペア化、
+//     超過した場合は PAIR_TIMEOUT_MS 後に単独追加する
 
-// Port 接続を最初に確立する
+// Port 接続を最初に確立する（background.js がメッセージを転送する）
 const port = chrome.runtime.connect({ name: "subtitle-panel" });
 port.onMessage.addListener((msg) => handleMessage(msg));
 
-// ログ機構
+// ログ機構（画面内デバッグ表示 + コピー・保存機能）
 const logLines = [];
 const debugLogEl = document.getElementById("debug-log");
 
@@ -20,13 +28,14 @@ function panelLog(msg) {
 }
 
 // 接続直後に自分のタブIDを background.js に伝える
+// background.js はこの tabId でルーティング先を特定する
 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   const tabId = tabs[0]?.id;
   panelLog(`PANEL_INIT 送信: tabId=${tabId}`);
   if (tabId) port.postMessage({ type: "PANEL_INIT", tabId });
 });
 
-// DEBUG LOG トグル
+// DEBUG LOG の開閉トグル
 const debugToggle = document.getElementById("debug-toggle");
 const debugBody = document.getElementById("debug-body");
 debugToggle.addEventListener("click", () => {
@@ -53,15 +62,18 @@ document.getElementById("btn-debug-clear").addEventListener("click", () => {
   debugLogEl.innerHTML = "";
 });
 
-let currentTracks = [];
-let frozen = false;
+let currentTracks = []; // TRACKS_LIST で受け取ったトラック情報のキャッシュ
+let frozen = false;     // true のとき字幕表示・履歴追加を一時停止する
 
-// タイムスタンプマッチング用バッファ。
-// 片方のスロットが先に届いたとき、タイムアウトまで相手を待つ。
-const PAIR_TIMEOUT_MS = 500; // 相手を待つ最大時間（ms）
-const PAIR_MATCH_MS  = 300; // この時間差以内ならペアとみなす（ms）
+// --------------------------------
+// ペアマッチング設定
+// --------------------------------
+// A と B の字幕は同時刻には届かないため、ts（タイムスタンプ）で突き合わせてペア化する。
+// PAIR_MATCH_MS 以内に相手が届けばペア、それ以降は PAIR_TIMEOUT_MS 後に単独追加。
+const PAIR_TIMEOUT_MS = 500; // 相手スロットを待つ最大時間（ms）
+const PAIR_MATCH_MS  = 300; // この時間差以内なら同時刻のペアとみなす（ms）
 
-// slot→{text, ts, timer} を保持
+// slot → { text, ts, timer } を一時的に保持するバッファ
 const pairBuffer = {};
 
 const textA = document.getElementById("en-text");
@@ -73,6 +85,7 @@ const selectB = document.getElementById("select-b");
 const statusTextEl = document.getElementById("status-text");
 const statusDotEl  = document.getElementById("status-dot");
 
+// ステータスインジケーターの更新
 function setStatus(state, label) {
   const labels = {
     connecting: "起動中...",
@@ -87,8 +100,10 @@ function setStatus(state, label) {
   }
 }
 
+// TRACKS_LIST 受信時にセレクトボックスを生成する
+// preferredLang に一致するものを自動選択し、CC より subtitles を優先する
 function populateSelects(tracks) {
-  if (tracks.length === 0) return; // count=0 は無視（内容も content.js 側で抑制済みだが俱備）
+  if (tracks.length === 0) return;
   currentTracks = tracks;
   panelLog(`TRACKS_LIST 受信 count=${tracks.length}`);
   chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (prefs) => {
@@ -118,6 +133,7 @@ function populateSelects(tracks) {
   });
 }
 
+// セレクトボックス変更 → background → content.js へ SELECT_TRACK を送信する
 selectA.addEventListener("change", () => {
   const idx = parseInt(selectA.value);
   const track = currentTracks.find((t) => t.index === idx);
@@ -134,7 +150,7 @@ selectB.addEventListener("change", () => {
   port.postMessage({ type: "SELECT_TRACK", slot: "B", trackIndex: idx });
 });
 
-// 履歴にペアを追加する
+// 履歴に A・B ペアを追加する
 function flushPair(slotA, slotB) {
   const pair = document.createElement("div");
   pair.className = "history-pair";
@@ -153,16 +169,15 @@ function flushPair(slotA, slotB) {
   historyEl.scrollTop = historyEl.scrollHeight;
 }
 
-// タイムスタンプマッチング履歴追加。
-// 相手スロットの ts との差が PAIR_MATCH_MS 以内ならペア化。
-// 超過したらタイムアウト後に単独追加。
+// ペアマッチング処理
+// 相手スロットの ts と比較し、PAIR_MATCH_MS 以内ならペア化する。
+// タイムスタンプ差が大きい場合は相手を単独追加してバッファを入れ替える。
 function addHistory(slot, text, ts) {
   const other = slot === "A" ? "B" : "A";
 
   if (pairBuffer[other]) {
-    // 相手がバッファにいる → ts 差をチェック
     if (Math.abs(ts - pairBuffer[other].ts) <= PAIR_MATCH_MS) {
-      // ペア成立
+      // ペア成立：タイマーをキャンセルしてまとめて追加する
       clearTimeout(pairBuffer[other].timer);
       const textA_ = slot === "A" ? text : pairBuffer[other].text;
       const textB_ = slot === "B" ? text : pairBuffer[other].text;
@@ -170,7 +185,7 @@ function addHistory(slot, text, ts) {
       flushPair(textA_, textB_);
       return;
     }
-    // ts 差が大きい場合は相手を単独追加しバッファを入れ替える
+    // ts 差が大きい → 相手を単独追加してバッファをリセットする
     clearTimeout(pairBuffer[other].timer);
     flushPair(
       other === "A" ? pairBuffer[other].text : undefined,
@@ -179,7 +194,7 @@ function addHistory(slot, text, ts) {
     delete pairBuffer[other];
   }
 
-  // バッファに登録し、PAIR_TIMEOUT_MS 後に単独フラッシュ
+  // バッファに登録。PAIR_TIMEOUT_MS 後に相手が来なければ単独追加する。
   const timer = setTimeout(() => {
     if (!pairBuffer[slot]) return;
     flushPair(
@@ -192,8 +207,12 @@ function addHistory(slot, text, ts) {
   pairBuffer[slot] = { text, ts, timer };
 }
 
+// --------------------------------
+// メッセージ振り分け
+// --------------------------------
 function handleMessage(msg) {
   if (msg.type === "DEBUG_LOG") {
+    // background.js のログを画面に表示する
     logLines.push(msg.line);
     if (logLines.length > 500) logLines.shift();
     const div = document.createElement("div");
@@ -207,6 +226,7 @@ function handleMessage(msg) {
     return;
   }
   if (msg.type === "TRACK_ATTACHED") {
+    // トラック割り当て完了 → セレクトボックスの表示を更新する
     panelLog(`TRACK_ATTACHED slot=${msg.slot} lang=${msg.lang}`);
     const target = msg.slot === "A" ? selectA : selectB;
     const match = currentTracks.find(
@@ -216,31 +236,33 @@ function handleMessage(msg) {
     return;
   }
   if (msg.type === "READY") {
+    // content.js のトラック割り当てが完了した
     panelLog("READY 受信: content.js トラック割り当て完了");
     setStatus("ready");
     return;
   }
   if (msg.type === "SUBTITLE_CUE") {
     panelLog(`SUBTITLE_CUE slot=${msg.slot} lang=${msg.lang} text=${msg.text?.slice(0, 20)}`);
-    if (frozen) return;
+    if (frozen) return; // freeze 中は更新しない
     if (msg.slot === "A") {
       textA.textContent = msg.text;
     } else {
       textB.textContent = msg.text;
     }
-    // ts をペアマッチングに使用
+    // ts を使ってペアマッチングを行い履歴に追加する
     addHistory(msg.slot, msg.text, msg.ts ?? Date.now());
   }
 }
 
+// 一時停止（freeze）トグル
 document.getElementById("btn-freeze").addEventListener("click", (e) => {
   frozen = !frozen;
   e.target.textContent = frozen ? "▶" : "⏸";
 });
 
+// 履歴クリア：DOM・バッファ・タイマーをすべてリセットする
 document.getElementById("btn-clear").addEventListener("click", () => {
   historyEl.innerHTML = "";
-  // バッファとタイマーもリセット
   Object.values(pairBuffer).forEach((b) => clearTimeout(b.timer));
   Object.keys(pairBuffer).forEach((k) => delete pairBuffer[k]);
   textA.textContent = "— 待機中 —";
