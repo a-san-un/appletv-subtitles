@@ -1,10 +1,57 @@
-// v0.9.4
+// v0.9.5
 const port = chrome.runtime.connect({ name: "subtitle-panel" });
 port.onMessage.addListener((msg) => handleMessage(msg));
 
 // 接続直後に自分のタブIDを background.js に伝える
 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-  if (tabs[0]) port.postMessage({ type: "PANEL_INIT", tabId: tabs[0].id });
+  const tabId = tabs[0]?.id;
+  panelLog(`PANEL_INIT: tabId=${tabId} url=${tabs[0]?.url?.slice(0, 60)}`);
+  if (tabId) port.postMessage({ type: "PANEL_INIT", tabId });
+});
+
+// ログ機構
+const logLines = [];
+const debugLogEl = document.getElementById("debug-log");
+
+function panelLog(msg) {
+  const line = `[Panel ${new Date().toISOString()}] ${msg}`;
+  console.log(line);
+  logLines.push(line);
+  if (logLines.length > 500) logLines.shift();
+  const div = document.createElement("div");
+  div.textContent = line;
+  debugLogEl.appendChild(div);
+  debugLogEl.scrollTop = debugLogEl.scrollHeight;
+}
+
+// DEBUG LOG トグル
+const debugToggle = document.getElementById("debug-toggle");
+const debugBody = document.getElementById("debug-body");
+debugToggle.addEventListener("click", () => {
+  const open = debugBody.classList.toggle("open");
+  debugToggle.textContent = (open ? "▼" : "▶") + " DEBUG LOG";
+});
+
+// コピー
+document.getElementById("btn-debug-copy").addEventListener("click", () => {
+  navigator.clipboard.writeText(logLines.join("\n"));
+});
+
+// .txt 保存
+document.getElementById("btn-debug-save").addEventListener("click", () => {
+  const blob = new Blob([logLines.join("\n")], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `subtitle-debug-${new Date().toISOString().replace(/:/g, "-")}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+// クリア
+document.getElementById("btn-debug-clear").addEventListener("click", () => {
+  logLines.length = 0;
+  debugLogEl.innerHTML = "";
 });
 
 let currentTracks = [];
@@ -19,6 +66,7 @@ const selectB = document.getElementById("select-b");
 
 function populateSelects(tracks) {
   currentTracks = tracks;
+  panelLog(`TRACKS_LIST 受信 count=${tracks.length}`);
   chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (prefs) => {
     [
       { sel: selectA, prefKey: prefs.preferredLangA },
@@ -50,6 +98,7 @@ selectA.addEventListener("change", () => {
   const idx = parseInt(selectA.value);
   const track = currentTracks.find((t) => t.index === idx);
   if (track) chrome.storage.sync.set({ preferredLangA: track.language });
+  panelLog(`SELECT_TRACK 送信 slot=A trackIndex=${idx}`);
   port.postMessage({ type: "SELECT_TRACK", slot: "A", trackIndex: idx });
 });
 
@@ -57,15 +106,27 @@ selectB.addEventListener("change", () => {
   const idx = parseInt(selectB.value);
   const track = currentTracks.find((t) => t.index === idx);
   if (track) chrome.storage.sync.set({ preferredLangB: track.language });
+  panelLog(`SELECT_TRACK 送信 slot=B trackIndex=${idx}`);
   port.postMessage({ type: "SELECT_TRACK", slot: "B", trackIndex: idx });
 });
 
 function handleMessage(msg) {
+  if (msg.type === "DEBUG_LOG") {
+    // background.js からのログをパネルに表示
+    logLines.push(msg.line);
+    if (logLines.length > 500) logLines.shift();
+    const div = document.createElement("div");
+    div.textContent = msg.line;
+    debugLogEl.appendChild(div);
+    debugLogEl.scrollTop = debugLogEl.scrollHeight;
+    return;
+  }
   if (msg.type === "TRACKS_LIST") {
     populateSelects(msg.tracks);
     return;
   }
   if (msg.type === "TRACK_ATTACHED") {
+    panelLog(`TRACK_ATTACHED slot=${msg.slot} lang=${msg.lang}`);
     const target = msg.slot === "A" ? selectA : selectB;
     const match = currentTracks.find(
       (t) => t.language === msg.lang && !t.label.includes("CC"),
@@ -74,6 +135,7 @@ function handleMessage(msg) {
     return;
   }
   if (msg.type === "SUBTITLE_CUE") {
+    panelLog(`SUBTITLE_CUE slot=${msg.slot} lang=${msg.lang} text=${msg.text?.slice(0, 20)}`);
     if (frozen) return;
     if (msg.slot === "A") {
       textA.textContent = msg.text;

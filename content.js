@@ -1,13 +1,13 @@
-// v0.9.3
+// v0.9.5
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・送信
-//
-// [v0.9.3 変更点]
-// - activateTrack(): パルス条件を disabled 判定 → cues が空っぽ判定に変更
-//   → hidden でも cues が未ロードならパルスが必要。以前は disabled のみパルスしていたため
-//   hidden+cues空のトラック（日本語等）が初回起動時に表示されない問題を修正
-// - パルス後は常に hidden に戻す（v0.9.2の方針を維持）
 
 (function () {
+  function ctLog(msg) {
+    const line = `[CT ${new Date().toISOString()}] ${msg}`;
+    console.log(line);
+    try { chrome.runtime.sendMessage({ type: "DEBUG_LOG", line }); } catch (_) {}
+  }
+
   function safeSend(msg) {
     try {
       chrome.runtime.sendMessage(msg);
@@ -33,6 +33,7 @@
       const cues = [...(track.activeCues || [])];
       if (!cues.length) return;
       const text = cues.map((c) => c.text.replace(/<[^>]*>/g, "")).join("\n");
+      ctLog(`cuechange slot=${slot} lang=${track.language} text=${text.slice(0, 30)}`);
       safeSend({
         type: "SUBTITLE_CUE",
         slot,
@@ -54,26 +55,26 @@
     }
   }
 
-  // トラックをスロット用に有効化する。
-  // スロットに割り当てたトラックは常に hidden で運用する。
-  // cues が空の場合のみ showing パルスで cues をロードさせ、パルス後は hidden に戻す。
   function activateTrack(track) {
-    // cues がすでにある場合: 属性を少し変えるだけで cuechange は自然に発火する
+    ctLog(`activateTrack lang=${track.language} mode=${track.mode} cues=${track.cues?.length ?? 'null'}`);
     if (track.cues && track.cues.length > 0) {
       track.mode = "hidden";
+      ctLog(`activateTrack → cuesありので hidden にそのまま`);
       return;
     }
-    // cues が空: disabled だとロードされないのでまず hidden に昇格してからパルス
     if (track.mode === "disabled") track.mode = "hidden";
     setTimeout(() => {
+      ctLog(`activateTrack → pulse showing lang=${track.language}`);
       track.mode = "showing";
       setTimeout(() => {
         track.mode = "hidden";
+        ctLog(`activateTrack → pulse 完了 hiddenに戻す lang=${track.language}`);
       }, 1000);
     }, 300);
   }
 
   function assignTrack(slot, track) {
+    ctLog(`assignTrack slot=${slot} lang=${track.language} mode=${track.mode} cues=${track.cues?.length ?? 'null'}`);
     const prev = activeSlots[slot];
     if (prev && prev !== track) {
       detachCueListener(prev);
@@ -96,11 +97,12 @@
   }
 
   function reloadAfterSeek() {
+    ctLog("seeked 検知、トラック再起動を確認");
     ["A", "B"].forEach((slot) => {
       const track = activeSlots[slot];
       if (!track) return;
-      // シーク後に cues が空になった場合だけ再起動
       if (!track.cues || track.cues.length === 0) {
+        ctLog(`seeked: slot=${slot} cues空のため activateTrack 再実行`);
         activateTrack(track);
       }
     });
@@ -122,6 +124,7 @@
 
   function sendTracksList(video) {
     const tracks = getValidTracks(video);
+    ctLog(`TRACKS_LIST 送信 count=${tracks.length}`);
     safeSend({
       type: "TRACKS_LIST",
       tracks: tracks.map((t, i) => ({
@@ -139,27 +142,32 @@
     if (!video) return;
     const track = getValidTracks(video)[msg.trackIndex];
     if (!track) return;
+    ctLog(`SELECT_TRACK 受信 slot=${msg.slot} trackIndex=${msg.trackIndex}`);
     assignTrack(msg.slot, track);
     chrome.storage.sync.set({ [`preferredLang${msg.slot}`]: track.language });
   });
 
   function initTracks(video) {
     const validTracks = getValidTracks(video);
+    ctLog(`initTracks 開始 validTracks=${validTracks.length}`);
     chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (result) => {
       const langA = result.preferredLangA || "en";
       const langB = result.preferredLangB || "ja";
+      ctLog(`initTracks langA=${langA} langB=${langB}`);
       const trackA = validTracks.find(
         (t) => t.language === langA && t.kind !== "captions",
       );
       const trackB = validTracks.find(
         (t) => t.language === langB && t.kind !== "captions",
       );
+      ctLog(`initTracks trackA=${trackA?.language ?? 'none'} trackB=${trackB?.language ?? 'none'}`);
       if (trackA) assignTrack("A", trackA);
       if (trackB) assignTrack("B", trackB);
     });
   }
 
   function init(video) {
+    ctLog("init() 開始");
     sendTracksList(video);
     initTracks(video);
     video.addEventListener("seeked", reloadAfterSeek);
@@ -171,7 +179,9 @@
   function bindVideoEvents(video) {
     if (currentVideo === video) return;
     currentVideo = video;
+    ctLog("video 要素を検知、イベントを登録");
     video.addEventListener("loadedmetadata", () => {
+      ctLog("loadedmetadata: スロットをリセットし init() 再実行");
       activeSlots.A = null;
       activeSlots.B = null;
       init(video);
@@ -182,11 +192,14 @@
   function waitForVideo() {
     const video = document.querySelector("video");
     if (video) {
+      ctLog("waitForVideo: video 即時検知");
       bindVideoEvents(video);
     } else {
+      ctLog("waitForVideo: video 未検知、MutationObserver 待機中");
       const obs = new MutationObserver(() => {
         const v = document.querySelector("video");
         if (v) {
+          ctLog("MutationObserver: video 検知");
           obs.disconnect();
           bindVideoEvents(v);
         }
