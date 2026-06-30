@@ -1,4 +1,4 @@
-// v0.13.1
+// v0.13.2
 // 役割: サイドパネルの UI 制御・メッセージ受信・履歴表示
 //
 // 主な処理:
@@ -7,6 +7,11 @@
 //   - SUBTITLE_CUE 受信で字幕テキストを表示し、ペアマッチングして履歴に追加する
 //   - ペアマッチング: A と B の ts 差が PAIR_MATCH_MS 以内ならペア化、
 //     超過した場合は PAIR_TIMEOUT_MS 後に単独追加する
+//
+// v0.13.2 修正:
+//   - TRACK_ATTACHED 受信時に currentTracks が空の場合でも lang を pendingAttached に保存し、
+//     後続の TRACKS_LIST 受信時にセレクトボックスへ正しく反映する。
+//     これにより再オープン時に意図しない言語（前回 storage に残った値）が選ばれるバグを修正。
 
 // Port 接続を最初に確立する（background.js がメッセージを転送する）
 const port = chrome.runtime.connect({ name: "subtitle-panel" });
@@ -69,6 +74,11 @@ document.getElementById("btn-debug-clear").addEventListener("click", () => {
 let currentTracks = []; // TRACKS_LIST で受け取ったトラック情報のキャッシュ
 let frozen = false;     // true のとき字幕表示・履歴追加を一時停止する
 
+// TRACK_ATTACHED で受け取った lang を一時保存する。
+// TRACKS_LIST が後から届いたときに preferredLang より優先して使う。
+// （再オープン時: TRACK_ATTACHED → TRACKS_LIST の順で届くため）
+const pendingAttached = { A: null, B: null };
+
 // --------------------------------
 // ペアマッチング設定
 // --------------------------------
@@ -104,18 +114,19 @@ function setStatus(state, label) {
   }
 }
 
-// TRACKS_LIST 受信時にセレクトボックスを生成する
-// preferredLang に一致するものを自動選択し、CC より subtitles を優先する
+// TRACKS_LIST 受信時にセレクトボックスを生成する。
+// 優先順位: (1) pendingAttached の lang（TRACK_ATTACHED で受け取った実際の割り当て）
+//           (2) chrome.storage.sync の preferredLang（前回ユーザーが選んだ言語）
+// CC より subtitles を優先する。
 function populateSelects(tracks) {
   if (tracks.length === 0) return;
   currentTracks = tracks;
   panelLog(`TRACKS_LIST 受信 count=${tracks.length}`);
   chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (prefs) => {
     [
-      { sel: selectA, prefKey: prefs.preferredLangA },
-      { sel: selectB, prefKey: prefs.preferredLangB },
-    ].forEach(({ sel, prefKey }) => {
-      const prev = sel.value;
+      { sel: selectA, slot: "A", prefKey: prefs.preferredLangA },
+      { sel: selectB, slot: "B", prefKey: prefs.preferredLangB },
+    ].forEach(({ sel, slot, prefKey }) => {
       sel.innerHTML = "";
       tracks.forEach((t) => {
         const opt = document.createElement("option");
@@ -123,16 +134,15 @@ function populateSelects(tracks) {
         opt.textContent = `${t.label} (${t.language})`;
         sel.appendChild(opt);
       });
-      if (prefKey) {
+
+      // pendingAttached を最優先で使う（再オープン時に content.js の実態を反映）
+      const langToUse = pendingAttached[slot] ?? prefKey;
+      if (langToUse) {
         const match = tracks.find(
-          (t) => t.language === prefKey && !t.label.includes("CC"),
+          (t) => t.language === langToUse && !t.label.includes("CC"),
         );
-        if (match) {
-          sel.value = match.index;
-          return;
-        }
+        if (match) { sel.value = match.index; return; }
       }
-      if (prev !== "") sel.value = prev;
     });
   });
 }
@@ -230,13 +240,15 @@ function handleMessage(msg) {
     return;
   }
   if (msg.type === "TRACK_ATTACHED") {
-    // トラック割り当て完了 → セレクトボックスの表示を更新する
     panelLog(`TRACK_ATTACHED slot=${msg.slot} lang=${msg.lang}`);
+    // content.js が実際に割り当てた lang を記録する。
+    // currentTracks がまだ空の場合でも保持しておき、後続の TRACKS_LIST で使う。
+    pendingAttached[msg.slot] = msg.lang;
     const target = msg.slot === "A" ? selectA : selectB;
     const match = currentTracks.find(
       (t) => t.language === msg.lang && !t.label.includes("CC"),
     );
-    if (match) target.value = match.index;
+    if (match) target.value = match.index; // currentTracks があれば即反映
     return;
   }
   if (msg.type === "READY") {
