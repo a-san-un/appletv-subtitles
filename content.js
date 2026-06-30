@@ -1,4 +1,4 @@
-// v0.9.5
+// v0.10.0
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・送信
 
 (function () {
@@ -59,16 +59,18 @@
     ctLog(`activateTrack lang=${track.language} mode=${track.mode} cues=${track.cues?.length ?? 'null'}`);
     if (track.cues && track.cues.length > 0) {
       track.mode = "hidden";
-      ctLog(`activateTrack → cuesありので hidden にそのまま`);
+      ctLog(`activateTrack → cuesあり hidden のまま`);
       return;
     }
     if (track.mode === "disabled") track.mode = "hidden";
+    // showing パルス中は addtrack イベントが発火しうるが
+    // sendTracksList のデバウンスで吸収されるため問題ない
     setTimeout(() => {
       ctLog(`activateTrack → pulse showing lang=${track.language}`);
       track.mode = "showing";
       setTimeout(() => {
         track.mode = "hidden";
-        ctLog(`activateTrack → pulse 完了 hiddenに戻す lang=${track.language}`);
+        ctLog(`activateTrack → pulse 完了 hidden に戻す lang=${track.language}`);
       }, 1000);
     }, 300);
   }
@@ -122,18 +124,23 @@
     return [...seen.values()];
   }
 
+  // addtrack イベントを 300ms デバウンスして連続送信を防ぐ
+  let tracksListTimer = null;
   function sendTracksList(video) {
-    const tracks = getValidTracks(video);
-    ctLog(`TRACKS_LIST 送信 count=${tracks.length}`);
-    safeSend({
-      type: "TRACKS_LIST",
-      tracks: tracks.map((t, i) => ({
-        index: i,
-        language: t.language,
-        label: formatLabel(t),
-        kind: t.kind,
-      })),
-    });
+    clearTimeout(tracksListTimer);
+    tracksListTimer = setTimeout(() => {
+      const tracks = getValidTracks(video);
+      ctLog(`TRACKS_LIST 送信 count=${tracks.length}`);
+      safeSend({
+        type: "TRACKS_LIST",
+        tracks: tracks.map((t, i) => ({
+          index: i,
+          language: t.language,
+          label: formatLabel(t),
+          kind: t.kind,
+        })),
+      });
+    }, 300);
   }
 
   chrome.runtime.onMessage.addListener((msg) => {
@@ -163,6 +170,10 @@
       ctLog(`initTracks trackA=${trackA?.language ?? 'none'} trackB=${trackB?.language ?? 'none'}`);
       if (trackA) assignTrack("A", trackA);
       if (trackB) assignTrack("B", trackB);
+
+      // トラック割り当て完了を sidepanel に通知（ステータスバー更新用）
+      safeSend({ type: "READY" });
+      ctLog("READY 送信");
     });
   }
 
@@ -171,6 +182,7 @@
     sendTracksList(video);
     initTracks(video);
     video.addEventListener("seeked", reloadAfterSeek);
+    // addtrack は頻繁に発火するためデバウンス版を使う
     video.textTracks.addEventListener("addtrack", () => sendTracksList(video));
   }
 

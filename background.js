@@ -1,4 +1,4 @@
-// v0.9.5
+// v0.10.0
 // 役割: content.js ↔ sidepanel.js の双方向メッセージ中継（タブ単位ルーティング）
 
 function bgLog(msg) {
@@ -12,8 +12,10 @@ function bgLog(msg) {
   }
 }
 
-// tabId → { port, queue: [] }
+// tabId → { port: MessagePort|null, queue: Array }
 const tabPorts = new Map();
+
+const QUEUE_LIMIT = 50; // キュー上限（TRACKS_LIST 大量発生に備えて余裕を持たせる）
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "subtitle-panel") return;
@@ -29,9 +31,14 @@ chrome.runtime.onConnect.addListener((port) => {
         tabPorts.get(boundTabId).port = port;
       }
       bgLog(`PANEL_INIT tabId=${boundTabId}`);
-      // キューに溜まっていたメッセージを送出
+      // キューに溜まっていたメッセージを即送出
       const entry = tabPorts.get(boundTabId);
-      while (entry.queue.length) port.postMessage(entry.queue.shift());
+      if (entry.queue.length > 0) {
+        bgLog(`キュー送出 ${entry.queue.length} 件 tabId=${boundTabId}`);
+        while (entry.queue.length) {
+          try { port.postMessage(entry.queue.shift()); } catch (_) {}
+        }
+      }
       return;
     }
 
@@ -60,8 +67,11 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     "READY",
   ].includes(msg.type)) return;
 
+  // TRACKS_LIST は件数のみ簡潔にログ（デバウンス後は1回なのでそのまま記録）
   if (msg.type === "SUBTITLE_CUE") {
     bgLog(`SUBTITLE_CUE slot=${msg.slot} lang=${msg.lang} tabId=${tabId}`);
+  } else if (msg.type === "TRACKS_LIST") {
+    bgLog(`TRACKS_LIST count=${msg.tracks?.length} tabId=${tabId}`);
   } else {
     bgLog(`${msg.type} tabId=${tabId}`);
   }
@@ -69,16 +79,18 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   const entry = tabPorts.get(tabId);
   if (entry) {
     if (entry.port) {
-      entry.port.postMessage(msg);
+      try { entry.port.postMessage(msg); } catch (_) {}
     } else {
-      bgLog(`port not yet bound for tabId=${tabId}, queuing`);
-      entry.queue.push(msg);
+      // Port 未確立（Panel が PANEL_INIT をまだ送っていない）→ キューへ
+      if (entry.queue.length < QUEUE_LIMIT) {
+        entry.queue.push(msg);
+      }
+      bgLog(`queued (${entry.queue.length}/${QUEUE_LIMIT}) tabId=${tabId}`);
     }
   } else {
-    bgLog(`no entry for tabId=${tabId}, creating queue`);
+    // tabPorts エントリ自体がない → 初回受信、エントリ作成してキューへ
+    bgLog(`new entry + queued tabId=${tabId}`);
     tabPorts.set(tabId, { port: null, queue: [msg] });
-    const q = tabPorts.get(tabId).queue;
-    if (q.length > 10) q.shift();
   }
 });
 

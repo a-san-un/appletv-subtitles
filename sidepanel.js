@@ -1,15 +1,12 @@
-// v0.9.5
+// v0.10.0
+
+// Port 接続を最初に確立する
+// （PANEL_INIT の送信は chrome.tabs.query のコールバック内で行うが、
+//   Port 自体は即座に確立しておかないと BG が postMessage できない）
 const port = chrome.runtime.connect({ name: "subtitle-panel" });
 port.onMessage.addListener((msg) => handleMessage(msg));
 
-// 接続直後に自分のタブIDを background.js に伝える
-chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-  const tabId = tabs[0]?.id;
-  panelLog(`PANEL_INIT: tabId=${tabId} url=${tabs[0]?.url?.slice(0, 60)}`);
-  if (tabId) port.postMessage({ type: "PANEL_INIT", tabId });
-});
-
-// ログ機構
+// ログ機構（PANEL_INIT より前に定義する必要がある）
 const logLines = [];
 const debugLogEl = document.getElementById("debug-log");
 
@@ -23,6 +20,13 @@ function panelLog(msg) {
   debugLogEl.appendChild(div);
   debugLogEl.scrollTop = debugLogEl.scrollHeight;
 }
+
+// 接続直後に自分のタブIDを background.js に伝える
+chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+  const tabId = tabs[0]?.id;
+  panelLog(`PANEL_INIT 送信: tabId=${tabId}`);
+  if (tabId) port.postMessage({ type: "PANEL_INIT", tabId });
+});
 
 // DEBUG LOG トグル
 const debugToggle = document.getElementById("debug-toggle");
@@ -63,6 +67,12 @@ const textB = document.getElementById("ja-text");
 const historyEl = document.getElementById("history-list");
 const selectA = document.getElementById("select-a");
 const selectB = document.getElementById("select-b");
+
+// ステータスバー要素（存在する場合のみ更新）
+const statusEl = document.getElementById("status");
+function setStatus(text) {
+  if (statusEl) statusEl.textContent = text;
+}
 
 function populateSelects(tracks) {
   currentTracks = tracks;
@@ -132,6 +142,11 @@ function handleMessage(msg) {
       (t) => t.language === msg.lang && !t.label.includes("CC"),
     );
     if (match) target.value = match.index;
+    return;
+  }
+  if (msg.type === "READY") {
+    panelLog("READY 受信: content.js トラック割り当て完了");
+    setStatus("接続済み");
     return;
   }
   if (msg.type === "SUBTITLE_CUE") {
