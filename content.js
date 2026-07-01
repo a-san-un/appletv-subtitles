@@ -1,4 +1,4 @@
-// v0.15.1
+// v0.15.2
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・background.js へ送信
 //
 // 処理フロー:
@@ -9,7 +9,8 @@
 //      showing トラックがなければ SHOWING_TRACK_NONE を送信
 //      showing トラックが変わったら SHOWING_TRACK_CHANGED を送信
 //   5. スロットB: preferredLangB に基づき自動割り当て・ユーザー選択可
-//      スロットBは hidden のみ使用（Apple TV+ の字幕表示に干渉しない）
+//      cues ロードのため showing → hidden サイクルを使用
+//      activatingSlotB フラグで change イベントを抑制しスロットAに干渉しない
 //   6. 割り当てたトラックに cuechange リスナーを付け SUBTITLE_CUE を送信
 //   7. PANEL_INIT 受信時は現在の状態を再送して UI を復元
 
@@ -38,6 +39,9 @@
   const listenerMap = new WeakMap();
   const activateTimers = { A: null, B: null };
   const checkTimers = { A: null, B: null };
+
+  // スロットBの showing→hidden サイクル中は change イベントを無視するフラグ
+  let activatingSlotB = false;
 
   // --------------------------------
   // cuechange リスナーの着脱
@@ -72,7 +76,8 @@
 
   // --------------------------------
   // トラックのアクティブ化（スロットB専用）
-  // hidden のみ使用。showing にしないことで Apple TV+ の字幕表示に干渉しない。
+  // cues ロードのため showing → hidden サイクルを使用
+  // activatingSlotB フラグで change イベント中の誤検知を防ぐ
   // --------------------------------
   function activateTrack(track, slot, force = false) {
     ctLog(`activateTrack lang=${track.language} slot=${slot} mode=${track.mode} cues=${track.cues?.length ?? "null"} force=${force}`);
@@ -95,21 +100,19 @@
       return;
     }
 
-    if (force) {
-      // force の場合: disabled → hidden で再ロード
-      track.mode = "disabled";
-      ctLog(`activateTrack: disabled 経由 (force)`);
-      const t1 = setTimeout(() => {
-        track.mode = "hidden";
-        ctLog(`activateTrack: hidden にセット (force) lang=${track.language}`);
-        if (slot) activateTimers[slot] = null;
-      }, 50);
-      if (slot) activateTimers[slot] = t1;
-    } else {
-      // 通常: hidden にセットするだけ
+    // showing → hidden サイクルで cues をロード
+    // activatingSlotB フラグを立てて change イベントを抑制
+    activatingSlotB = true;
+    track.mode = "showing";
+    ctLog(`activateTrack: showing → hidden サイクル開始 lang=${track.language} force=${force}`);
+
+    const t1 = setTimeout(() => {
       track.mode = "hidden";
-      ctLog(`activateTrack: hidden にセット lang=${track.language}`);
-    }
+      activatingSlotB = false;
+      ctLog(`activateTrack: hidden にセット lang=${track.language} cues=${track.cues?.length ?? "null"}`);
+      if (slot) activateTimers[slot] = null;
+    }, 50);
+    if (slot) activateTimers[slot] = t1;
   }
 
   // スロットにトラックを割り当て、前のトラックのリスナーを解除する
@@ -128,7 +131,7 @@
     activeSlots[slot] = track;
     attachCueListener(track, slot);
     safeSend({ type: "TRACK_ATTACHED", slot, lang: track.language, label: formatLabel(track) });
-    // スロットBのみ activateTrack を呼ぶ（hidden にセット）
+    // スロットBのみ activateTrack を呼ぶ（showing→hidden サイクル）
     // スロットAは Apple TV+ の showing をそのまま使うため呼ばない
     if (slot === "B") activateTrack(track, slot);
   }
@@ -328,11 +331,19 @@
     ctLog("addtrack リスナー登録");
 
     // showing トラックの変化を監視してスロットAを更新
-    video.textTracks.addEventListener("change", () => notifyShowingTrack(video));
+    // activatingSlotB フラグが立っている間は無視（スロットBのロード中）
+    video.textTracks.addEventListener("change", () => {
+      if (activatingSlotB) {
+        ctLog("change イベント: activatingSlotB=true → スキップ");
+        return;
+      }
+      notifyShowingTrack(video);
+    });
     ctLog("change リスナー登録");
 
     video.addEventListener("loadedmetadata", () => {
       ctLog(`loadedmetadata: スロットをリセットし init() 再実行 src=${video.src?.slice(-40)}`);
+      activatingSlotB = false;
       ["A", "B"].forEach((slot) => {
         if (activeSlots[slot]) detachCueListener(activeSlots[slot]);
         activeSlots[slot] = null;
