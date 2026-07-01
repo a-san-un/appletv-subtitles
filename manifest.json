@@ -12,7 +12,6 @@
     {
       "matches": ["https://tv.apple.com/*"],
       "js": ["content.js"],
-      "css": ["content.css"],
       "run_at": "document_idle"
     }
   ],
