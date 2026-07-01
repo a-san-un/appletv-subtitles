@@ -1,4 +1,4 @@
-// v0.14.2
+// v0.14.3
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・ background.js へ送信
 //
 // 主な処理フロー:
@@ -33,6 +33,16 @@
 //     force=true の場合、過去の cues が残っていても強制的に showing → hidden サイクルを実行
 //   - reloadAfterSeek: activeCues が無い場合は force=true で activateTrack を呼び出す
 //     これにより大ジャンプシーク後に過去 cues が残っていても新セグメントを取得できるよう修正
+//
+// v0.14.3 変更:
+//   - activateTrack: originalMode を記憶し、サイクル完了後に元の mode へ復元
+//     → Apple TV+ のUI字幕設定に干渉しなくなる（画面字幕を独立して制御可能）
+//   - activateTrack: force=true 時は disabled → hidden → showing のフルサイクルを経由
+//     → HLS セグメント取得トリガーを確実に発生させる
+//   - activateTrack: checkTimers によるポーリング（100ms 間隔）を追加
+//     → cues 増加を検知したら 2000ms を待たずに早期復元（動的待機）
+//     → [時間計測] ログでセグメント取得にかかった実時間を計測可能
+//   - checkTimers を追加（activateTimers と同様にスロット単位で管理）
 
 (function () {
   function ctLog(msg) {
@@ -62,10 +72,10 @@
   const activeSlots = { A: null, B: null };
   const listenerMap = new WeakMap();
 
-  // ★ スロットごとの activateTrack タイマーID を保持する（競合防止）
-  // assignTrack / reloadAfterSeek のどちらから呼ばれても
-  // 前回のタイマーをキャンセルしてから新しいタイマーを開始する。
+  // スロットごとの activateTrack タイマーID（競合防止）
   const activateTimers = { A: null, B: null };
+  // ★ スロットごとのポーリング用インターバルID
+  const checkTimers = { A: null, B: null };
 
   // --------------------------------
   // cuechange リスナーの着脱
@@ -101,36 +111,81 @@
   // --------------------------------
   // トラックのアクティブ化
   // --------------------------------
-  // force=true の場合、過去の cues が残っていても強制的に showing → hidden サイクルを実行する。
-  // これにより大ジャンプシーク後に HLS の新しい字幕セグメントを取得させることができる。
-  // force=false（デフォルト）の場合は従来通り cues があれば hidden にして即リターン。
+  // force=false（デフォルト）: cues があれば mode を維持して終了（初回ロード済み）
+  // force=true: disabled → hidden → showing のフルサイクルで HLS セグメント取得を強制。
+  //             完了後は originalMode に復元し Apple TV+ のUI設定に干渉しない。
+  //             ポーリングにより cues 増加を検知したら 2000ms 前に早期復元する。
   function activateTrack(track, slot, force = false) {
-    ctLog(`activateTrack lang=${track.language} slot=${slot ?? "none"} mode=${track.mode} cues=${track.cues?.length ?? "null"} force=${force}`);
+    const originalMode = track.mode; // ★ 元のモードを記憶
+    ctLog(`activateTrack lang=${track.language} slot=${slot ?? "none"} mode=${originalMode} cues=${track.cues?.length ?? "null"} force=${force}`);
 
-    // force=false かつ cues がある場合は hidden にして終了（初回ロード済みと判断）
+    // force=false かつ cues がある場合はセグメント取得済みと判断 → mode 維持
     if (!force && track.cues && track.cues.length > 0) {
-      track.mode = "hidden";
-      ctLog(`activateTrack: cues あり → hidden (cues=${track.cues.length}) lang=${track.language}`);
+      ctLog(`activateTrack: cues あり → mode維持 (cues=${track.cues.length}) lang=${track.language}`);
       return;
     }
 
-    // ★ 前回のタイマーをキャンセルする
+    // 前回タイマーキャンセル
     if (slot && activateTimers[slot] != null) {
       clearTimeout(activateTimers[slot]);
       activateTimers[slot] = null;
       ctLog(`activateTrack: 前タイマーキャンセル slot=${slot}`);
     }
 
-    if (track.mode === "disabled") track.mode = "hidden";
+    // ★ 前回のポーリングもキャンセル
+    if (slot && checkTimers[slot] != null) {
+      clearInterval(checkTimers[slot]);
+      checkTimers[slot] = null;
+    }
+
+    // ★ force=true の場合は disabled を経由して HLS セグメント取得を確実にトリガー
+    if (force) {
+      track.mode = "disabled";
+      ctLog(`activateTrack: disabled 経由 (force) lang=${track.language}`);
+    }
 
     const t1 = setTimeout(() => {
-      ctLog(`activateTrack: showing 開始 lang=${track.language} slot=${slot ?? "none"}`);
-      track.mode = "showing";
+      if (force) track.mode = "hidden"; // disabled → hidden の遷移
+
       const t2 = setTimeout(() => {
-        ctLog(`activateTrack: hidden 復帰 cues=${track.cues?.length ?? "null"} lang=${track.language}`);
-        track.mode = "hidden";
-        if (slot) activateTimers[slot] = null;
-      }, 1000);
+        ctLog(`activateTrack: showing 開始 lang=${track.language} slot=${slot ?? "none"}`);
+        track.mode = "showing";
+
+        // ★ ポーリング：100ms ごとに cues 増加を監視し、増えたら早期復元
+        const startTime = performance.now();
+        const initialCueCount = track.cues ? track.cues.length : 0;
+
+        if (force && slot) {
+          checkTimers[slot] = setInterval(() => {
+            const currentCueCount = track.cues ? track.cues.length : 0;
+            if (currentCueCount > initialCueCount) {
+              const elapsed = performance.now() - startTime;
+              ctLog(`[時間計測] データ到着: ${elapsed.toFixed(1)}ms (cues: ${initialCueCount} → ${currentCueCount}) slot=${slot}`);
+
+              // データ到着 → 2000ms を待たずに復元
+              clearInterval(checkTimers[slot]);
+              checkTimers[slot] = null;
+              clearTimeout(activateTimers[slot]);
+              activateTimers[slot] = null;
+              track.mode = originalMode;
+              ctLog(`activateTrack: 早期復元 cues=${currentCueCount} lang=${track.language} → ${originalMode}`);
+            }
+          }, 100);
+        }
+
+        // 最大 2000ms のタイムアウト（安全装置）
+        const t3 = setTimeout(() => {
+          if (slot && checkTimers[slot]) {
+            clearInterval(checkTimers[slot]);
+            checkTimers[slot] = null;
+          }
+          ctLog(`activateTrack: タイムアウト(2000ms)による復元 cues=${track.cues?.length ?? "null"} lang=${track.language} → ${originalMode}`);
+          track.mode = originalMode;
+          if (slot) activateTimers[slot] = null;
+        }, 2000);
+
+        if (slot) activateTimers[slot] = t3;
+      }, force ? 100 : 0);
       if (slot) activateTimers[slot] = t2;
     }, 300);
 
@@ -167,8 +222,7 @@
       ctLog(`seeked slot=${slot} lang=${track.language ?? "none"} cues=${cueCount}`);
 
       if (!hasActiveCue) {
-        // ★ v0.14.2: activeCues が無い場合は force=true で強制ロード
-        // 過去の cues が残っていても showing サイクルを回して新セグメントを取得させる
+        // activeCues が無い場合は force=true で強制ロード
         ctLog(`seeked: slot=${slot} activeCues 無し → 強制ロード (force=true)`);
         activateTrack(track, slot, true);
       } else {
@@ -201,8 +255,6 @@
   }
 
   // TRACKS_LIST 送信（300ms デバウンス）
-  // NOTE: tracksListTimer はグローバル1つ。PANEL_INIT と addtrack が
-  // 同時に発火するとデバウンスがリセットされ若干遅延することがあるが実害は軽微。
   let tracksListTimer = null;
   function sendTracksList(video) {
     clearTimeout(tracksListTimer);
@@ -281,9 +333,6 @@
   // --------------------------------
   // init(): トラック割り当て + TRACKS_LIST 送信
   // --------------------------------
-  // NOTE: seeked / addtrack リスナーは bindVideoEvents() で1回だけ登録する。
-  // init() は loadedmetadata のたびに再呼び出しされるため、
-  // ここでリスナーを登録すると多重登録になる。
   function init(video) {
     ctLog("init() 開始");
     sendTracksList(video);
@@ -293,9 +342,6 @@
   // --------------------------------
   // <video> 要素へのイベント登録
   // --------------------------------
-  // seeked / addtrack は video 単位で1回だけ登録する。
-  // loadedmetadata（エピソード切替）のたびに init() を再実行して
-  // スロットをリセットし、トラックを再割り当てする。
   let currentVideo = null;
 
   function bindVideoEvents(video) {
@@ -303,7 +349,6 @@
     currentVideo = video;
     ctLog("新しい video 要素を検出、イベントを登録");
 
-    // ★ seeked / addtrack をここで1回だけ登録する（init() に書かない）
     video.addEventListener("seeked", () => reloadAfterSeek(video));
     ctLog("seeked リスナー登録");
     video.textTracks.addEventListener("addtrack", () => sendTracksList(video));
@@ -314,10 +359,14 @@
       ["A", "B"].forEach((slot) => {
         if (activeSlots[slot]) detachCueListener(activeSlots[slot]);
         activeSlots[slot] = null;
-        // ★ スロットのタイマーもリセットする
         if (activateTimers[slot] != null) {
           clearTimeout(activateTimers[slot]);
           activateTimers[slot] = null;
+        }
+        // ★ ポーリングタイマーもリセット
+        if (checkTimers[slot] != null) {
+          clearInterval(checkTimers[slot]);
+          checkTimers[slot] = null;
         }
       });
       init(video);
