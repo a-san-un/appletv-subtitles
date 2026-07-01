@@ -1,4 +1,4 @@
-// v0.14.7
+// v0.16.0
 // 役割: content.js ↔ sidepanel.js の双方向メッセージ中継（タブ単位ルーティング）
 //
 // アーキテクチャ:
@@ -27,6 +27,10 @@
 //     「Attempting to use a disconnected port object」が連続発生していた。
 //     失敗を検知した時点で entry.port = null にしてキューモードへ移行する。
 //     対象箇所: bgLog / CT_LOG 即時転送 / 通常メッセージ即時転送 の計3箇所。
+//
+// v0.16.0 変更:
+//   - SHOWING_TRACK_CHANGED / SHOWING_TRACK_NONE を中継対象に追加
+//   - 未使用の SETUP_REQUIRED を削除
 
 function bgLog(msg) {
   const line = `[BG ${new Date().toISOString()}] ${msg}`;
@@ -35,22 +39,16 @@ function bgLog(msg) {
     if (entry.port) {
       try { entry.port.postMessage({ type: "DEBUG_LOG", line }); } catch (e) {
         console.warn(`[BG] bgLog postMessage失敗 tabId=${tabId}: ${e.message}`);
-        // ★ v0.14.7: ゾンビポートを解消してキューモードへ移行
         entry.port = null;
       }
     }
   }
 }
 
-// tabId → { port, queue, ctLogQueue }
-// port:       現在接続中の sidepanel Port（閉じると null）
-// queue:      panel 未接続中に受信した通常メッセージのバックログ
-// ctLogQueue: panel 未接続中に受信した CT_LOG のバックログ（専用・独立管理）
 const tabPorts = new Map();
-const QUEUE_LIMIT = 50;         // 通常キュー上限（溢れたメッセージは破棄）
-const CT_LOG_QUEUE_LIMIT = 20;  // CT_LOG 専用キュー上限
+const QUEUE_LIMIT = 50;
+const CT_LOG_QUEUE_LIMIT = 20;
 
-// --- sidepanel.js からの接続 ---
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "subtitle-panel") return;
 
@@ -58,7 +56,6 @@ chrome.runtime.onConnect.addListener((port) => {
 
   port.onMessage.addListener((msg) => {
     if (msg.type === "PANEL_INIT") {
-      // sidepanel が開いた（または再オープンした）タイミングで呼ばれる
       boundTabId = msg.tabId;
       if (!tabPorts.has(boundTabId)) {
         tabPorts.set(boundTabId, { port, queue: [], ctLogQueue: [] });
@@ -69,7 +66,6 @@ chrome.runtime.onConnect.addListener((port) => {
       const entry = tabPorts.get(boundTabId);
       bgLog(`PANEL_INIT tabId=${boundTabId} queueSize=${entry.queue.length} ctLogQueueSize=${entry.ctLogQueue.length}`);
 
-      // CT_LOG 専用キューを先に送出する（時系列を保つため）
       if (entry.ctLogQueue.length > 0) {
         bgLog(`CT_LOG キュー送出 ${entry.ctLogQueue.length} 件 tabId=${boundTabId}`);
         while (entry.ctLogQueue.length) {
@@ -79,7 +75,6 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       }
 
-      // 通常キューを送出する
       if (entry.queue.length > 0) {
         bgLog(`キュー送出 ${entry.queue.length} 件 tabId=${boundTabId}`);
         while (entry.queue.length) {
@@ -89,14 +84,11 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       }
 
-      // content.js に PANEL_INIT を転送して状態再送を要求する
-      // → content.js は TRACKS_LIST / TRACK_ATTACHED / READY を返す
       bgLog(`PANEL_INIT を content.js へ転送 tabId=${boundTabId}`);
       chrome.tabs.sendMessage(boundTabId, { type: "PANEL_INIT" }).catch(() => {});
       return;
     }
 
-    // sidepanel → content.js へのトラック選択指示を転送する
     if (msg.type === "SELECT_TRACK" && boundTabId) {
       bgLog(`SELECT_TRACK slot=${msg.slot} trackIndex=${msg.trackIndex} → tabId=${boundTabId}`);
       chrome.tabs.sendMessage(boundTabId, msg).catch(() => {});
@@ -104,7 +96,6 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 
   port.onDisconnect.addListener(() => {
-    // パネルが閉じられた。port を null にしてキューモードへ移行する。
     bgLog(`port disconnected tabId=${boundTabId}`);
     if (boundTabId && tabPorts.has(boundTabId)) {
       tabPorts.get(boundTabId).port = null;
@@ -112,49 +103,39 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-// --- content.js からのメッセージ受信 ---
-// runtime.sendMessage で送られてくる字幕・トラック情報を
-// 対応タブの sidepanel Port に転送する。
 chrome.runtime.onMessage.addListener((msg, sender) => {
   const tabId = sender.tab?.id;
   if (!tabId) return;
 
-  // CT_LOG は専用キューで別管理する
   if (msg.type === "CT_LOG") {
     const entry = tabPorts.get(tabId);
     if (entry) {
       if (entry.port) {
-        // ポートがある時は即転送（キューには積まない）
         try { entry.port.postMessage(msg); } catch (e) {
           bgLog(`CT_LOG postMessage失敗: ${e.message}`);
-          // ★ v0.14.7: ゾンビポートを解消
           entry.port = null;
-          // 転送失敗分を専用キューに積む
           if (entry.ctLogQueue.length < CT_LOG_QUEUE_LIMIT) {
             entry.ctLogQueue.push(msg);
           }
         }
       } else {
-        // ポートがない時は専用キューに積む
         if (entry.ctLogQueue.length < CT_LOG_QUEUE_LIMIT) {
           entry.ctLogQueue.push(msg);
         }
-        // 溢れた分は静かに破棄（ログ自体のログは出さない）
       }
     } else {
-      // 初回受信：エントリを新規作成して専用キューに積む
       tabPorts.set(tabId, { port: null, queue: [], ctLogQueue: [msg] });
     }
     return;
   }
 
-  // 処理対象メッセージ種別のみ受け付ける
   if (![
-    "SUBTITLE_CUE",   // 字幕テキスト
-    "TRACK_ATTACHED", // トラック割り当て完了通知
-    "TRACKS_LIST",    // 有効トラック一覧
-    "SETUP_REQUIRED", // （将来用）
-    "READY",          // 初期化完了通知
+    "SUBTITLE_CUE",
+    "TRACK_ATTACHED",
+    "TRACKS_LIST",
+    "READY",
+    "SHOWING_TRACK_CHANGED",
+    "SHOWING_TRACK_NONE",
   ].includes(msg.type)) return;
 
   if (msg.type === "SUBTITLE_CUE") {
@@ -168,19 +149,15 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   const entry = tabPorts.get(tabId);
   if (entry) {
     if (entry.port) {
-      // パネルが開いていれば直接送信する
       try { entry.port.postMessage(msg); } catch (e) {
         bgLog(`postMessage失敗 type=${msg.type}: ${e.message}`);
-        // ★ v0.14.7: ゾンビポートを解消してキューモードへ移行
         entry.port = null;
-        // 送れなかったメッセージをキューに積む
         if (entry.queue.length < QUEUE_LIMIT) {
           entry.queue.push(msg);
           bgLog(`queued (失敗後) type=${msg.type} (${entry.queue.length}/${QUEUE_LIMIT}) tabId=${tabId}`);
         }
       }
     } else {
-      // パネルが閉じていればキューに積む
       if (entry.queue.length < QUEUE_LIMIT) {
         entry.queue.push(msg);
         bgLog(`queued type=${msg.type} (${entry.queue.length}/${QUEUE_LIMIT}) tabId=${tabId}`);
@@ -189,15 +166,11 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       }
     }
   } else {
-    // 初回受信：エントリを新規作成してキューに積む
     bgLog(`new entry + queued type=${msg.type} tabId=${tabId}`);
     tabPorts.set(tabId, { port: null, queue: [msg], ctLogQueue: [] });
   }
 });
 
-// --- タブ閉じた時のクリーンアップ ---
-// ★ Apple TV+ のタブが閉じられた際に tabPorts からエントリを削除する。
-// これがないと長時間使用時に不要なキュー・ポート情報が湎積しメモリリークになる。
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (tabPorts.has(tabId)) {
     bgLog(`タブ閉鎖検知: tabId=${tabId} の tabPorts エントリを削除`);
@@ -205,8 +178,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
-// --- サイドパネルの有効化 ---
-// Apple TV+ のページが読み込み完了したらサイドパネルを有効にする
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "complete" && tab.url?.includes("tv.apple.com")) {
     bgLog(`tabs.onUpdated: enabling sidePanel for tabId=${tabId}`);
@@ -214,7 +185,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-// 拡張機能アイコンクリックでサイドパネルを開く
 chrome.action.onClicked.addListener((tab) => {
   bgLog(`action.onClicked tabId=${tab.id} url=${tab.url?.slice(0, 60)}`);
   chrome.sidePanel.open({ tabId: tab.id });
