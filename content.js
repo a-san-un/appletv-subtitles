@@ -1,4 +1,4 @@
-// v0.14.0
+// v0.14.1
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・ background.js へ送信
 //
 // 主な処理フロー:
@@ -22,6 +22,11 @@
 //     連打シーク時の showing/hidden 競合を解消
 //   - activateTrack(track, slot) に slot 引数を追加
 //   - 各修正箇所に確認用ログを追加
+//
+// v0.14.1 変更:
+//   - reloadAfterSeek: cues はあるがシーク先に activeCues が無い場合、
+//     track.mode = "hidden" を再代入してブラウザに cuechange 再認識させる（念押し）
+//     これにより「cues=33 スキップ → 字幕止まる」バグを修正
 
 (function () {
   function ctLog(msg) {
@@ -149,11 +154,22 @@
       const track = activeSlots[slot];
       const cueCount = track?.cues?.length ?? "null";
       ctLog(`seeked slot=${slot} lang=${track?.language ?? "none"} cues=${cueCount}`);
-      if (track && (!track.cues || track.cues.length === 0)) {
+      if (!track) return;
+
+      const hasCues = track.cues && track.cues.length > 0;
+      const hasActiveCue = track.activeCues && track.activeCues.length > 0;
+
+      if (!hasCues) {
+        // cues 自体が空 → showing/hidden でロードし直す
         ctLog(`seeked: slot=${slot} cues 空のため activateTrack 再実行`);
-        activateTrack(track, slot); // ★ slot を渡す
-      } else if (track) {
-        ctLog(`seeked: slot=${slot} cues=${cueCount} スキップ`);
+        activateTrack(track, slot);
+      } else if (!hasActiveCue) {
+        // ★ v0.14.1: cues はあるがシーク先に activeCues が無い
+        // → hidden を再代入してブラウザに cuechange 再認識させる（念押し）
+        ctLog(`seeked: slot=${slot} cues=${cueCount} activeCues 無し → hidden 念押し`);
+        track.mode = "hidden";
+      } else {
+        ctLog(`seeked: slot=${slot} cues=${cueCount} activeCues=${track.activeCues.length} スキップ`);
       }
     });
   }
