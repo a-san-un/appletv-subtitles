@@ -1,4 +1,4 @@
-// v0.15.0
+// v0.15.1
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・background.js へ送信
 //
 // 処理フロー:
@@ -9,6 +9,7 @@
 //      showing トラックがなければ SHOWING_TRACK_NONE を送信
 //      showing トラックが変わったら SHOWING_TRACK_CHANGED を送信
 //   5. スロットB: preferredLangB に基づき自動割り当て・ユーザー選択可
+//      スロットBは hidden のみ使用（Apple TV+ の字幕表示に干渉しない）
 //   6. 割り当てたトラックに cuechange リスナーを付け SUBTITLE_CUE を送信
 //   7. PANEL_INIT 受信時は現在の状態を再送して UI を復元
 
@@ -71,16 +72,10 @@
 
   // --------------------------------
   // トラックのアクティブ化（スロットB専用）
-  // スロットAは Apple TV+ が showing を管理するため呼ばない
+  // hidden のみ使用。showing にしないことで Apple TV+ の字幕表示に干渉しない。
   // --------------------------------
   function activateTrack(track, slot, force = false) {
-    const RESTORE_MODE = "hidden";
     ctLog(`activateTrack lang=${track.language} slot=${slot} mode=${track.mode} cues=${track.cues?.length ?? "null"} force=${force}`);
-
-    if (!force && track.cues && track.cues.length > 0) {
-      ctLog(`activateTrack: cues あり → mode維持 (cues=${track.cues.length})`);
-      return;
-    }
 
     if (slot && activateTimers[slot] != null) {
       clearTimeout(activateTimers[slot]);
@@ -91,53 +86,30 @@
       checkTimers[slot] = null;
     }
 
-    if (force) {
-      track.mode = "disabled";
-      ctLog(`activateTrack: disabled 経由 (force)`);
+    if (!force && track.cues && track.cues.length > 0) {
+      // cues が既にある場合は hidden にセットするだけ
+      if (track.mode !== "hidden") {
+        track.mode = "hidden";
+        ctLog(`activateTrack: cues あり → hidden にセット (cues=${track.cues.length})`);
+      }
+      return;
     }
 
-    const t1 = setTimeout(() => {
-      if (force) track.mode = "hidden";
-
-      const t2 = setTimeout(() => {
-        ctLog(`activateTrack: showing 開始 lang=${track.language} slot=${slot}`);
-        track.mode = "showing";
-
-        const startTime = performance.now();
-        const initialCueCount = track.cues ? track.cues.length : 0;
-
-        if (force && slot) {
-          checkTimers[slot] = setInterval(() => {
-            const currentCueCount = track.cues ? track.cues.length : 0;
-            if (currentCueCount > initialCueCount) {
-              const elapsed = performance.now() - startTime;
-              ctLog(`[時間計測] データ到着: ${elapsed.toFixed(1)}ms (cues: ${initialCueCount} → ${currentCueCount}) slot=${slot}`);
-              clearInterval(checkTimers[slot]);
-              checkTimers[slot] = null;
-              clearTimeout(activateTimers[slot]);
-              activateTimers[slot] = null;
-              track.mode = RESTORE_MODE;
-              ctLog(`activateTrack: 早期復元 cues=${currentCueCount} → ${RESTORE_MODE}`);
-            }
-          }, 100);
-        }
-
-        const t3 = setTimeout(() => {
-          if (slot && checkTimers[slot]) {
-            clearInterval(checkTimers[slot]);
-            checkTimers[slot] = null;
-          }
-          ctLog(`activateTrack: タイムアウト(2000ms)による復元 cues=${track.cues?.length ?? "null"} lang=${track.language} → ${RESTORE_MODE}`);
-          track.mode = RESTORE_MODE;
-          if (slot) activateTimers[slot] = null;
-        }, 2000);
-
-        if (slot) activateTimers[slot] = t3;
-      }, force ? 50 : 0);
-      if (slot) activateTimers[slot] = t2;
-    }, 0);
-
-    if (slot) activateTimers[slot] = t1;
+    if (force) {
+      // force の場合: disabled → hidden で再ロード
+      track.mode = "disabled";
+      ctLog(`activateTrack: disabled 経由 (force)`);
+      const t1 = setTimeout(() => {
+        track.mode = "hidden";
+        ctLog(`activateTrack: hidden にセット (force) lang=${track.language}`);
+        if (slot) activateTimers[slot] = null;
+      }, 50);
+      if (slot) activateTimers[slot] = t1;
+    } else {
+      // 通常: hidden にセットするだけ
+      track.mode = "hidden";
+      ctLog(`activateTrack: hidden にセット lang=${track.language}`);
+    }
   }
 
   // スロットにトラックを割り当て、前のトラックのリスナーを解除する
@@ -146,13 +118,17 @@
     const prev = activeSlots[slot];
     if (prev && prev !== track) {
       detachCueListener(prev);
-      const usedByOther = Object.entries(activeSlots).some(([s, t]) => s !== slot && t === prev);
-      if (!usedByOther) prev.mode = "disabled";
+      // スロットAのトラックには触らない（Apple TV+ が管理）
+      // スロットBの前トラックのみ disabled にする
+      if (slot === "B") {
+        const usedByOther = Object.entries(activeSlots).some(([s, t]) => s !== slot && t === prev);
+        if (!usedByOther) prev.mode = "disabled";
+      }
     }
     activeSlots[slot] = track;
     attachCueListener(track, slot);
     safeSend({ type: "TRACK_ATTACHED", slot, lang: track.language, label: formatLabel(track) });
-    // スロットBのみ activateTrack でセグメント取得を行う
+    // スロットBのみ activateTrack を呼ぶ（hidden にセット）
     // スロットAは Apple TV+ の showing をそのまま使うため呼ばない
     if (slot === "B") activateTrack(track, slot);
   }
@@ -210,13 +186,15 @@
 
   // --------------------------------
   // 画面の showing トラックを取得（スロットA用）
+  // スロットBに割り当て済みのトラックは除外する
   // --------------------------------
   function getShowingTrack(video) {
     for (const track of video.textTracks) {
       if (
         track.mode === "showing" &&
         track.kind !== "captions" &&
-        !track.label.toLowerCase().includes("forced")
+        !track.label.toLowerCase().includes("forced") &&
+        track !== activeSlots["B"]  // スロットBのトラックは除外
       ) {
         return track;
       }
