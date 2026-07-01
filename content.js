@@ -1,4 +1,4 @@
-// v0.14.4
+// v0.14.5
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・ background.js へ送信
 //
 // 主な処理フロー:
@@ -55,6 +55,13 @@
 //     300ms の待機は不要。これにより画面字幕の一時表示時間を短縮する。
 //   - content.css の ::cue 透明化を削除したため、activateTrack の showing 中は
 //     Apple TV+ のネイティブ字幕がそのまま表示される（副作用は最小限に抑制済み）。
+//
+// v0.14.5 変更:
+//   - getValidTracks: kind="captions" のトラックを除外するよう修正
+//     理由: Apple TV+ は同一言語に subtitles と captions の両方を持つ場合があり、
+//     captions を除外しないとキーが "English" と "English CC" で別扱いされ、
+//     重複トラック（例: en subtitles cues=66 と en captions cues=98）が両方残る。
+//     これによりトラックリストのインデックスズレや意図しないトラック選択が発生していた。
 
 (function () {
   function ctLog(msg) {
@@ -257,6 +264,13 @@
     const seen = new Map();
     for (const track of video.textTracks) {
       if (!track.language) continue;
+      // ★ v0.14.5: kind="captions" を除外
+      // 理由: Apple TV+ は同一言語に subtitles と captions の両方を持つ場合があり、
+      // captions を含めるとキーが "English" と "English CC" で別扱いされ重複が残る。
+      if (track.kind === "captions") {
+        ctLog(`getValidTracks: captions 除外 lang=${track.language} label=${track.label}`);
+        continue;
+      }
       if (track.label.toLowerCase().includes("forced")) {
         ctLog(`getValidTracks: forced 除外 lang=${track.language} label=${track.label}`);
         continue;
@@ -339,8 +353,8 @@
     chrome.storage.sync.get(["preferredLangA", "preferredLangB"], (result) => {
       const langA = result.preferredLangA || "en";
       const langB = result.preferredLangB || "ja";
-      const trackA = validTracks.find((t) => t.language === langA && t.kind !== "captions");
-      const trackB = validTracks.find((t) => t.language === langB && t.kind !== "captions");
+      const trackA = validTracks.find((t) => t.language === langA);
+      const trackB = validTracks.find((t) => t.language === langB);
       ctLog(`initTracks trackA=${trackA?.language ?? "none"} trackB=${trackB?.language ?? "none"}`);
       if (trackA) assignTrack("A", trackA);
       if (trackB) assignTrack("B", trackB);
