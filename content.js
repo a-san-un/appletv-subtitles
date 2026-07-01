@@ -1,4 +1,4 @@
-// v0.14.1
+// v0.14.2
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・ background.js へ送信
 //
 // 主な処理フロー:
@@ -27,6 +27,12 @@
 //   - reloadAfterSeek: cues はあるがシーク先に activeCues が無い場合、
 //     track.mode = "hidden" を再代入してブラウザに cuechange 再認識させる（念押し）
 //     これにより「cues=33 スキップ → 字幕止まる」バグを修正
+//
+// v0.14.2 変更:
+//   - activateTrack に force 引数（デフォルト false）を追加
+//     force=true の場合、過去の cues が残っていても強制的に showing → hidden サイクルを実行
+//   - reloadAfterSeek: activeCues が無い場合は force=true で activateTrack を呼び出す
+//     これにより大ジャンプシーク後に過去 cues が残っていても新セグメントを取得できるよう修正
 
 (function () {
   function ctLog(msg) {
@@ -95,13 +101,14 @@
   // --------------------------------
   // トラックのアクティブ化
   // --------------------------------
-  // slot 引数でタイマーをスロット単位に管理する。
-  // 前回のタイマーが残っていれば clearTimeout してから新しいタイマーを開始する。
-  // これにより連打シーク・手動切り替えでの showing/hidden 競合を防ぐ。
-  function activateTrack(track, slot) {
-    ctLog(`activateTrack lang=${track.language} slot=${slot ?? "none"} mode=${track.mode} cues=${track.cues?.length ?? "null"}`);
+  // force=true の場合、過去の cues が残っていても強制的に showing → hidden サイクルを実行する。
+  // これにより大ジャンプシーク後に HLS の新しい字幕セグメントを取得させることができる。
+  // force=false（デフォルト）の場合は従来通り cues があれば hidden にして即リターン。
+  function activateTrack(track, slot, force = false) {
+    ctLog(`activateTrack lang=${track.language} slot=${slot ?? "none"} mode=${track.mode} cues=${track.cues?.length ?? "null"} force=${force}`);
 
-    if (track.cues && track.cues.length > 0) {
+    // force=false かつ cues がある場合は hidden にして終了（初回ロード済みと判断）
+    if (!force && track.cues && track.cues.length > 0) {
       track.mode = "hidden";
       ctLog(`activateTrack: cues あり → hidden (cues=${track.cues.length}) lang=${track.language}`);
       return;
@@ -142,7 +149,7 @@
     activeSlots[slot] = track;
     attachCueListener(track, slot);
     safeSend({ type: "TRACK_ATTACHED", slot, lang: track.language, label: formatLabel(track) });
-    activateTrack(track, slot); // ★ slot を渡す
+    activateTrack(track, slot); // force=false（デフォルト）
   }
 
   // --------------------------------
@@ -152,22 +159,18 @@
     ctLog(`seeked currentTime=${video.currentTime?.toFixed(2)}`);
     ["A", "B"].forEach((slot) => {
       const track = activeSlots[slot];
-      const cueCount = track?.cues?.length ?? "null";
-      ctLog(`seeked slot=${slot} lang=${track?.language ?? "none"} cues=${cueCount}`);
       if (!track) return;
 
-      const hasCues = track.cues && track.cues.length > 0;
+      const cueCount = track.cues?.length ?? "null";
       const hasActiveCue = track.activeCues && track.activeCues.length > 0;
 
-      if (!hasCues) {
-        // cues 自体が空 → showing/hidden でロードし直す
-        ctLog(`seeked: slot=${slot} cues 空のため activateTrack 再実行`);
-        activateTrack(track, slot);
-      } else if (!hasActiveCue) {
-        // ★ v0.14.1: cues はあるがシーク先に activeCues が無い
-        // → hidden を再代入してブラウザに cuechange 再認識させる（念押し）
-        ctLog(`seeked: slot=${slot} cues=${cueCount} activeCues 無し → hidden 念押し`);
-        track.mode = "hidden";
+      ctLog(`seeked slot=${slot} lang=${track.language ?? "none"} cues=${cueCount}`);
+
+      if (!hasActiveCue) {
+        // ★ v0.14.2: activeCues が無い場合は force=true で強制ロード
+        // 過去の cues が残っていても showing サイクルを回して新セグメントを取得させる
+        ctLog(`seeked: slot=${slot} activeCues 無し → 強制ロード (force=true)`);
+        activateTrack(track, slot, true);
       } else {
         ctLog(`seeked: slot=${slot} cues=${cueCount} activeCues=${track.activeCues.length} スキップ`);
       }
