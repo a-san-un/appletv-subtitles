@@ -1,4 +1,4 @@
-// v0.14.1
+// v0.14.7
 // 役割: content.js ↔ sidepanel.js の双方向メッセージ中継（タブ単位ルーティング）
 //
 // アーキテクチャ:
@@ -19,14 +19,24 @@
 // v0.14.1 変更:
 //   - chrome.tabs.onRemoved を追加。タブが閉じられた際に tabPorts から
 //     該当エントリを削除しメモリリークを防止する。
+//
+// v0.14.7 変更:
+//   - postMessage 失敗時にポートを null にセットするよう修正
+//     理由: sidepanel を閉じる際に onDisconnect より先に postMessage が
+//     失敗するケースがあり、その後も entry.port がゾンビ状態のまま残り
+//     「Attempting to use a disconnected port object」が連続発生していた。
+//     失敗を検知した時点で entry.port = null にしてキューモードへ移行する。
+//     対象箇所: bgLog / CT_LOG 即時転送 / 通常メッセージ即時転送 の計3箇所。
 
 function bgLog(msg) {
   const line = `[BG ${new Date().toISOString()}] ${msg}`;
   console.log(line);
-  for (const [, entry] of tabPorts) {
+  for (const [tabId, entry] of tabPorts) {
     if (entry.port) {
       try { entry.port.postMessage({ type: "DEBUG_LOG", line }); } catch (e) {
-        console.error(`[BG] bgLog postMessage失敗: ${e.message}`);
+        console.warn(`[BG] bgLog postMessage失敗 tabId=${tabId}: ${e.message}`);
+        // ★ v0.14.7: ゾンビポートを解消してキューモードへ移行
+        entry.port = null;
       }
     }
   }
@@ -117,6 +127,12 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
         // ポートがある時は即転送（キューには積まない）
         try { entry.port.postMessage(msg); } catch (e) {
           bgLog(`CT_LOG postMessage失敗: ${e.message}`);
+          // ★ v0.14.7: ゾンビポートを解消
+          entry.port = null;
+          // 転送失敗分を専用キューに積む
+          if (entry.ctLogQueue.length < CT_LOG_QUEUE_LIMIT) {
+            entry.ctLogQueue.push(msg);
+          }
         }
       } else {
         // ポートがない時は専用キューに積む
@@ -155,6 +171,13 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       // パネルが開いていれば直接送信する
       try { entry.port.postMessage(msg); } catch (e) {
         bgLog(`postMessage失敗 type=${msg.type}: ${e.message}`);
+        // ★ v0.14.7: ゾンビポートを解消してキューモードへ移行
+        entry.port = null;
+        // 送れなかったメッセージをキューに積む
+        if (entry.queue.length < QUEUE_LIMIT) {
+          entry.queue.push(msg);
+          bgLog(`queued (失敗後) type=${msg.type} (${entry.queue.length}/${QUEUE_LIMIT}) tabId=${tabId}`);
+        }
       }
     } else {
       // パネルが閉じていればキューに積む
