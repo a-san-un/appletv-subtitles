@@ -1,4 +1,4 @@
-// v0.14.5
+// v0.14.6
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・ background.js へ送信
 //
 // 主な処理フロー:
@@ -62,6 +62,14 @@
 //     captions を除外しないとキーが "English" と "English CC" で別扱いされ、
 //     重複トラック（例: en subtitles cues=66 と en captions cues=98）が両方残る。
 //     これによりトラックリストのインデックスズレや意図しないトラック選択が発生していた。
+//
+// v0.14.6 変更:
+//   - reloadAfterSeek: activateTrack が進行中（activateTimers[slot] != null）の
+//     スロットは seeked をスキップするよう修正
+//     理由: showing フェーズ中に seeked が発火すると、進行中の activateTrack が
+//     キャンセルされ disabled → showing が競合する。Apple TV+ はこの操作を
+//     「字幕オフ」と解釈し以降の HLS セグメントを送信しなくなるため、
+//     en トラックの cues が増えず字幕が止まるバグを引き起こしていた。
 
 (function () {
   function ctLog(msg) {
@@ -241,6 +249,14 @@
     ["A", "B"].forEach((slot) => {
       const track = activeSlots[slot];
       if (!track) return;
+
+      // ★ v0.14.6: activateTrack が進行中のスロットは seeked をスキップ
+      // 理由: showing フェーズ中に seeked が割り込むと disabled が競合し、
+      // Apple TV+ が字幕オフと解釈して HLS セグメントを送らなくなる。
+      if (activateTimers[slot] != null) {
+        ctLog(`seeked: slot=${slot} activateTrack 進行中 → スキップ`);
+        return;
+      }
 
       const cueCount = track.cues?.length ?? "null";
       const hasActiveCue = track.activeCues && track.activeCues.length > 0;
