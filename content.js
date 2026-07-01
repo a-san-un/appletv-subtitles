@@ -1,4 +1,4 @@
-// v0.14.3
+// v0.14.4
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・ background.js へ送信
 //
 // 主な処理フロー:
@@ -43,6 +43,18 @@
 //     → cues 増加を検知したら 2000ms を待たずに早期復元（動的待機）
 //     → [時間計測] ログでセグメント取得にかかった実時間を計測可能
 //   - checkTimers を追加（activateTimers と同様にスロット単位で管理）
+//
+// v0.14.4 変更:
+//   - activateTrack: originalMode バグ修正
+//     復元先を originalMode（呼び出し時の瞬間値）から RESTORE_MODE="hidden" 固定に変更。
+//     理由: seeked 連打時に disabled が originalMode に混入し、復元後も
+//     cuechange が発火しなくなる（字幕停止）バグを解消するため。
+//     hidden は cuechange が発火する最低限のモードであり、画面字幕を表示しない。
+//   - activateTrack: showing フェーズ前の待機を 300ms → 0ms に短縮
+//     理由: HLS セグメント取得トリガーは disabled の瞬間に発生するため、
+//     300ms の待機は不要。これにより画面字幕の一時表示時間を短縮する。
+//   - content.css の ::cue 透明化を削除したため、activateTrack の showing 中は
+//     Apple TV+ のネイティブ字幕がそのまま表示される（副作用は最小限に抑制済み）。
 
 (function () {
   function ctLog(msg) {
@@ -74,7 +86,7 @@
 
   // スロットごとの activateTrack タイマーID（競合防止）
   const activateTimers = { A: null, B: null };
-  // ★ スロットごとのポーリング用インターバルID
+  // スロットごとのポーリング用インターバルID
   const checkTimers = { A: null, B: null };
 
   // --------------------------------
@@ -113,11 +125,16 @@
   // --------------------------------
   // force=false（デフォルト）: cues があれば mode を維持して終了（初回ロード済み）
   // force=true: disabled → hidden → showing のフルサイクルで HLS セグメント取得を強制。
-  //             完了後は originalMode に復元し Apple TV+ のUI設定に干渉しない。
+  //             完了後は RESTORE_MODE="hidden" に復元。
   //             ポーリングにより cues 増加を検知したら 2000ms 前に早期復元する。
+  //
+  // ★ v0.14.4: originalMode ではなく RESTORE_MODE="hidden" 固定で復元する。
+  //   理由: seeked 連打時に track.mode が disabled の瞬間に呼ばれると
+  //   originalMode=disabled となり、復元後も cuechange が発火しなくなるため。
   function activateTrack(track, slot, force = false) {
-    const originalMode = track.mode; // ★ 元のモードを記憶
-    ctLog(`activateTrack lang=${track.language} slot=${slot ?? "none"} mode=${originalMode} cues=${track.cues?.length ?? "null"} force=${force}`);
+    // ★ 復元先は常に "hidden" 固定（originalMode は使わない）
+    const RESTORE_MODE = "hidden";
+    ctLog(`activateTrack lang=${track.language} slot=${slot ?? "none"} mode=${track.mode} cues=${track.cues?.length ?? "null"} force=${force} restoreTo=${RESTORE_MODE}`);
 
     // force=false かつ cues がある場合はセグメント取得済みと判断 → mode 維持
     if (!force && track.cues && track.cues.length > 0) {
@@ -132,26 +149,28 @@
       ctLog(`activateTrack: 前タイマーキャンセル slot=${slot}`);
     }
 
-    // ★ 前回のポーリングもキャンセル
+    // 前回のポーリングもキャンセル
     if (slot && checkTimers[slot] != null) {
       clearInterval(checkTimers[slot]);
       checkTimers[slot] = null;
     }
 
-    // ★ force=true の場合は disabled を経由して HLS セグメント取得を確実にトリガー
+    // force=true の場合は disabled を経由して HLS セグメント取得を確実にトリガー
     if (force) {
       track.mode = "disabled";
       ctLog(`activateTrack: disabled 経由 (force) lang=${track.language}`);
     }
 
+    // ★ v0.14.4: 300ms → 0ms に短縮（HLS トリガーは disabled の瞬間に発生するため待機不要）
     const t1 = setTimeout(() => {
       if (force) track.mode = "hidden"; // disabled → hidden の遷移
 
+      // ★ v0.14.4: 100ms → 50ms に短縮（showing への遷移を早める）
       const t2 = setTimeout(() => {
         ctLog(`activateTrack: showing 開始 lang=${track.language} slot=${slot ?? "none"}`);
         track.mode = "showing";
 
-        // ★ ポーリング：100ms ごとに cues 増加を監視し、増えたら早期復元
+        // ポーリング：100ms ごとに cues 増加を監視し、増えたら早期復元
         const startTime = performance.now();
         const initialCueCount = track.cues ? track.cues.length : 0;
 
@@ -167,8 +186,8 @@
               checkTimers[slot] = null;
               clearTimeout(activateTimers[slot]);
               activateTimers[slot] = null;
-              track.mode = originalMode;
-              ctLog(`activateTrack: 早期復元 cues=${currentCueCount} lang=${track.language} → ${originalMode}`);
+              track.mode = RESTORE_MODE; // ★ 常に "hidden" に戻す
+              ctLog(`activateTrack: 早期復元 cues=${currentCueCount} lang=${track.language} → ${RESTORE_MODE}`);
             }
           }, 100);
         }
@@ -179,15 +198,15 @@
             clearInterval(checkTimers[slot]);
             checkTimers[slot] = null;
           }
-          ctLog(`activateTrack: タイムアウト(2000ms)による復元 cues=${track.cues?.length ?? "null"} lang=${track.language} → ${originalMode}`);
-          track.mode = originalMode;
+          ctLog(`activateTrack: タイムアウト(2000ms)による復元 cues=${track.cues?.length ?? "null"} lang=${track.language} → ${RESTORE_MODE}`);
+          track.mode = RESTORE_MODE; // ★ 常に "hidden" に戻す
           if (slot) activateTimers[slot] = null;
         }, 2000);
 
         if (slot) activateTimers[slot] = t3;
-      }, force ? 100 : 0);
+      }, force ? 50 : 0); // ★ 100ms → 50ms
       if (slot) activateTimers[slot] = t2;
-    }, 300);
+    }, 0); // ★ 300ms → 0ms
 
     if (slot) activateTimers[slot] = t1;
   }
@@ -363,7 +382,7 @@
           clearTimeout(activateTimers[slot]);
           activateTimers[slot] = null;
         }
-        // ★ ポーリングタイマーもリセット
+        // ポーリングタイマーもリセット
         if (checkTimers[slot] != null) {
           clearInterval(checkTimers[slot]);
           checkTimers[slot] = null;

@@ -1,29 +1,9 @@
 /*
  * content.css
- * Apple TV+ のネイティブ字幕レンダラーを完全に透明化する。
  *
- * 【問題】
- *   activateTrack() で cues をロードするために track.mode を一時的に
- *   "showing" にする必要がある。この間、プレイヤーが字幕テキストと
- *   背景の黒帯を画面に描画してしまう。
- *
- * 【解決策】
- *   ::cue          → 字幕テキストを透明化
- *   ::cue-region   → 背景の黒帯を透明化
- *   これにより cuechange イベントは正常に発火し続ける（字幕取得に影響なし）。
- *
- * 【確認済み動作】
- *   - track.mode = "showing" 中も字幕テキスト・黒帯ともに非表示
- *   - cuechange イベントは透明化後も正常発火
- *   - クリーンアップ（mode = "disabled"）後も副作用なし
+ * v0.14.4 変更:
+ *   - ::cue / ::cue-region の透明化スタイルを削除。
+ *   - Apple TV+ のネイティブ字幕表示をプレイヤーに完全に委ねる。
+ *   - activateTrack の showing フェーズ短縮（300ms→0ms + 100ms→50ms）により
+ *     副作用（showing 中の一時表示）も最小限に抑制済み。
  */
-
-::cue {
-  color: transparent !important;
-  text-shadow: none !important;
-  background-color: transparent !important;
-}
-
-::cue-region {
-  background: transparent !important;
-}
