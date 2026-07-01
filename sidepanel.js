@@ -1,4 +1,4 @@
-// v0.15.0
+// v0.16.0
 // 役割: サイドパネルの UI 制御・メッセージ受信・履歴表示
 //
 // 処理:
@@ -71,7 +71,7 @@ document.getElementById("btn-debug-clear").addEventListener("click", () => {
 
 let currentTracks = [];
 let frozen = false;
-const pendingAttached = { A: null, B: null };
+const pendingAttached = { B: null };
 
 const PAIR_TIMEOUT_MS = 500;
 const PAIR_MATCH_MS  = 300;
@@ -100,7 +100,6 @@ function setStatus(state, label) {
   }
 }
 
-// スロットBのセレクトボックスを生成する
 function populateSelects(tracks) {
   if (tracks.length === 0) return;
   currentTracks = tracks;
@@ -140,10 +139,10 @@ function flushPair(slotA, slotB) {
   const pair = document.createElement("div");
   pair.className = "history-pair";
   const rowA = document.createElement("div");
-  rowA.className = "history-item slot-a";
+  rowA.className = "history-a";
   rowA.textContent = slotA ?? "";
   const rowB = document.createElement("div");
-  rowB.className = "history-item slot-b";
+  rowB.className = "history-b";
   rowB.textContent = slotB ?? "";
   pair.appendChild(rowA);
   pair.appendChild(rowB);
@@ -188,9 +187,6 @@ function addHistory(slot, text, ts) {
   pairBuffer[slot] = { text, ts, timer };
 }
 
-// --------------------------------
-// メッセージ振り分け
-// --------------------------------
 function handleMessage(msg) {
   if (msg.type === "DEBUG_LOG") { appendDebugLine(msg.line); return; }
   if (msg.type === "CT_LOG")    { appendDebugLine(msg.line); return; }
@@ -215,8 +211,8 @@ function handleMessage(msg) {
 
   if (msg.type === "TRACK_ATTACHED") {
     panelLog(`TRACK_ATTACHED slot=${msg.slot} lang=${msg.lang}`);
-    pendingAttached[msg.slot] = msg.lang;
     if (msg.slot === "B") {
+      pendingAttached["B"] = msg.lang;
       const match = currentTracks.find(
         (t) => t.language === msg.lang && !t.label.includes("CC"),
       );

@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Apple TV+ Subtitle Panel",
-  "version": "0.15.1",
+  "version": "0.16.0",
   "description": "Apple TV+ の字幕をSide Panelに2言語同時表示する学習補助ツール",
-  "permissions": ["sidePanel", "tabs", "scripting", "storage"],
+  "permissions": ["sidePanel", "tabs", "storage"],
   "host_permissions": ["https://tv.apple.com/*"],
   "background": {
     "service_worker": "background.js"

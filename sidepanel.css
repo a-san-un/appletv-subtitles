@@ -1,4 +1,4 @@
-/* v0.10.1 */
+/* v0.16.0 */
 :root {
   --bg: #0f0f0f;
   --surface: #1a1a1a;
@@ -12,6 +12,7 @@
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
+
 *,
 *::before,
 *::after {
@@ -19,6 +20,7 @@
   margin: 0;
   padding: 0;
 }
+
 
 html,
 body {
@@ -32,6 +34,7 @@ body {
   display: flex;
   flex-direction: column;
 }
+
 
 /* ヘッダー */
 .header {
@@ -73,6 +76,7 @@ body {
   color: var(--accent-a);
 }
 
+
 /* トラック選択 */
 .track-selector {
   display: flex;
@@ -102,6 +106,11 @@ body {
 .slot-b {
   color: var(--accent-b);
 }
+.track-status {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 
 .track-select {
   flex: 1;
@@ -119,6 +128,7 @@ body {
 .track-select:focus {
   border-color: var(--accent-a);
 }
+
 
 /* 現在の字幕 */
 .current-section {
@@ -158,6 +168,7 @@ body {
   background: var(--border);
   margin: 6px 14px 0;
 }
+
 
 /* 履歴 */
 .history-section {
@@ -216,6 +227,7 @@ body {
   margin-top: 1px;
 }
 
+
 /* ステータスバー */
 .status-bar {
   display: flex;
@@ -234,15 +246,6 @@ body {
   flex-shrink: 0;
   transition: background 300ms;
 }
-/* 既存クラス（後方互換） */
-.status-dot.connected {
-  background: #6daa45;
-}
-.status-dot.receiving {
-  background: var(--accent-a);
-  animation: pulse 1s ease-in-out 2;
-}
-/* v0.10.1 追加: setStatus() から付与される状態クラス */
 .status-dot.dot-connecting {
   background: #f5a623;
   animation: pulse 1.2s ease-in-out infinite;
@@ -260,6 +263,7 @@ body {
   color: var(--text-faint);
 }
 
+
 @keyframes pulse {
   0%,
   100% {
@@ -270,6 +274,7 @@ body {
   }
 }
 
+
 /* デバッグパネル */
 #debug-section {
   border-top: 1px solid #333;
@@ -279,6 +284,7 @@ body {
   font-size: 11px;
   flex-shrink: 0;
 }
+
 
 #debug-toggle {
   width: 100%;
@@ -292,18 +298,22 @@ body {
   font-family: monospace;
 }
 
+
 #debug-toggle:hover {
   background: #222;
 }
+
 
 #debug-body {
   display: none;
 }
 
+
 #debug-body.open {
   display: flex;
   flex-direction: column;
 }
+
 
 #debug-log {
   height: 140px;
@@ -313,12 +323,14 @@ body {
   word-break: break-all;
 }
 
+
 #debug-actions {
   display: flex;
   gap: 4px;
   padding: 4px 8px;
   border-top: 1px solid #222;
 }
+
 
 #debug-actions button {
   flex: 1;
@@ -330,6 +342,7 @@ body {
   font-size: 10px;
   cursor: pointer;
 }
+
 
 #debug-actions button:hover {
   background: #333;

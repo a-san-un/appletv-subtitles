@@ -1,4 +1,4 @@
-// v0.15.3
+// v0.16.0
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・background.js へ送信
 //
 // 処理フロー:
@@ -38,18 +38,10 @@
   const activeSlots = { A: null, B: null };
   const listenerMap = new WeakMap();
   const activateTimers = { A: null, B: null };
-  const checkTimers = { A: null, B: null };
 
-  // スロットBの showing→hidden サイクル中は change イベントを無視するフラグ
   let activatingSlotB = false;
-
-  // notifyShowingTrack のデバウンスタイマー
-  // change イベントが短時間に複数発火する場合に最後の状態だけを送信する
   let notifyTimer = null;
 
-  // --------------------------------
-  // cuechange リスナーの着脱
-  // --------------------------------
   function attachCueListener(track, slot) {
     if (listenerMap.has(track)) return;
     const handler = () => {
@@ -78,11 +70,6 @@
     }
   }
 
-  // --------------------------------
-  // トラックのアクティブ化（スロットB専用）
-  // cues ロードのため showing → hidden サイクルを使用
-  // activatingSlotB フラグで change イベント中の誤検知を防ぐ
-  // --------------------------------
   function activateTrack(track, slot, force = false) {
     ctLog(`activateTrack lang=${track.language} slot=${slot} mode=${track.mode} cues=${track.cues?.length ?? "null"} force=${force}`);
 
@@ -90,13 +77,8 @@
       clearTimeout(activateTimers[slot]);
       activateTimers[slot] = null;
     }
-    if (slot && checkTimers[slot] != null) {
-      clearInterval(checkTimers[slot]);
-      checkTimers[slot] = null;
-    }
 
     if (!force && track.cues && track.cues.length > 0) {
-      // cues が既にある場合は hidden にセットするだけ
       if (track.mode !== "hidden") {
         track.mode = "hidden";
         ctLog(`activateTrack: cues あり → hidden にセット (cues=${track.cues.length})`);
@@ -104,8 +86,6 @@
       return;
     }
 
-    // showing → hidden サイクルで cues をロード
-    // activatingSlotB フラグを立てて change イベントを抑制
     activatingSlotB = true;
     track.mode = "showing";
     ctLog(`activateTrack: showing → hidden サイクル開始 lang=${track.language} force=${force}`);
@@ -119,14 +99,11 @@
     if (slot) activateTimers[slot] = t1;
   }
 
-  // スロットにトラックを割り当て、前のトラックのリスナーを解除する
   function assignTrack(slot, track) {
     ctLog(`assignTrack slot=${slot} lang=${track.language}`);
     const prev = activeSlots[slot];
     if (prev && prev !== track) {
       detachCueListener(prev);
-      // スロットAのトラックには触らない（Apple TV+ が管理）
-      // スロットBの前トラックのみ disabled にする
       if (slot === "B") {
         const usedByOther = Object.entries(activeSlots).some(([s, t]) => s !== slot && t === prev);
         if (!usedByOther) prev.mode = "disabled";
@@ -135,14 +112,9 @@
     activeSlots[slot] = track;
     attachCueListener(track, slot);
     safeSend({ type: "TRACK_ATTACHED", slot, lang: track.language, label: formatLabel(track) });
-    // スロットBのみ activateTrack を呼ぶ（showing→hidden サイクル）
-    // スロットAは Apple TV+ の showing をそのまま使うため呼ばない
     if (slot === "B") activateTrack(track, slot);
   }
 
-  // --------------------------------
-  // シーク後の再ロード（スロットBのみ）
-  // --------------------------------
   function reloadAfterSeek(video) {
     ctLog(`seeked currentTime=${video.currentTime?.toFixed(2)}`);
     const track = activeSlots["B"];
@@ -164,9 +136,6 @@
     }
   }
 
-  // --------------------------------
-  // 有効トラック一覧の取得（スロットB用セレクトボックス向け）
-  // --------------------------------
   function getValidTracks(video) {
     const seen = new Map();
     for (const track of video.textTracks) {
@@ -191,17 +160,13 @@
     return result;
   }
 
-  // --------------------------------
-  // 画面の showing トラックを取得（スロットA用）
-  // スロットBに割り当て済みのトラックは除外する
-  // --------------------------------
   function getShowingTrack(video) {
     for (const track of video.textTracks) {
       if (
         track.mode === "showing" &&
         track.kind !== "captions" &&
         !track.label.toLowerCase().includes("forced") &&
-        track !== activeSlots["B"]  // スロットBのトラックは除外
+        track !== activeSlots["B"]
       ) {
         return track;
       }
@@ -209,7 +174,6 @@
     return null;
   }
 
-  // TRACKS_LIST 送信（300ms デバウンス）
   let tracksListTimer = null;
   function sendTracksList(video) {
     clearTimeout(tracksListTimer);
@@ -229,8 +193,6 @@
     }, 300);
   }
 
-  // showing トラックの状態を通知（スロットA用）
-  // 100ms デバウンス: change イベントが短時間に複数発火しても最後の状態だけを送信
   function notifyShowingTrack(video) {
     clearTimeout(notifyTimer);
     notifyTimer = setTimeout(() => {
@@ -252,12 +214,8 @@
     }, 100);
   }
 
-  // --------------------------------
-  // background.js からのメッセージ受信
-  // --------------------------------
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === "SELECT_TRACK") {
-      // スロットBのみ SELECT_TRACK を受け付ける
       if (msg.slot !== "B") return;
       const video = document.querySelector("video");
       if (!video) return;
@@ -292,17 +250,12 @@
     }
   });
 
-  // --------------------------------
-  // トラックの自動割り当て
-  // --------------------------------
   function initTracks(video) {
     const validTracks = getValidTracks(video);
     ctLog(`initTracks 開始 validTracks=${validTracks.length}`);
 
-    // スロットA: 画面の showing トラックを反映
     notifyShowingTrack(video);
 
-    // スロットB: preferredLangB に基づき割り当て
     chrome.storage.sync.get(["preferredLangB"], (result) => {
       const langB = result.preferredLangB || "ja";
       const trackB = validTracks.find((t) => t.language === langB);
@@ -313,18 +266,12 @@
     });
   }
 
-  // --------------------------------
-  // init(): トラック割り当て + TRACKS_LIST 送信
-  // --------------------------------
   function init(video) {
     ctLog("init() 開始");
     sendTracksList(video);
     initTracks(video);
   }
 
-  // --------------------------------
-  // <video> 要素へのイベント登録
-  // --------------------------------
   let currentVideo = null;
 
   function bindVideoEvents(video) {
@@ -338,8 +285,6 @@
     video.textTracks.addEventListener("addtrack", () => sendTracksList(video));
     ctLog("addtrack リスナー登録");
 
-    // showing トラックの変化を監視してスロットAを更新
-    // activatingSlotB フラグが立っている間は無視（スロットBのロード中）
     video.textTracks.addEventListener("change", () => {
       if (activatingSlotB) {
         ctLog("change イベント: activatingSlotB=true → スキップ");
@@ -358,7 +303,6 @@
         if (activeSlots[slot]) detachCueListener(activeSlots[slot]);
         activeSlots[slot] = null;
         if (activateTimers[slot] != null) { clearTimeout(activateTimers[slot]); activateTimers[slot] = null; }
-        if (checkTimers[slot] != null) { clearInterval(checkTimers[slot]); checkTimers[slot] = null; }
       });
       init(video);
     });
@@ -366,9 +310,6 @@
     init(video);
   }
 
-  // --------------------------------
-  // <video> 要素の監視
-  // --------------------------------
   function watchForVideo() {
     const v = document.querySelector("video");
     if (v) {
