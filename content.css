@@ -1,9 +1,0 @@
-/*
- * content.css
- *
- * v0.14.4 変更:
- *   - ::cue / ::cue-region の透明化スタイルを削除。
- *   - Apple TV+ のネイティブ字幕表示をプレイヤーに完全に委ねる。
- *   - activateTrack の showing フェーズ短縮（300ms→0ms + 100ms→50ms）により
- *     副作用（showing 中の一時表示）も最小限に抑制済み。
- */
