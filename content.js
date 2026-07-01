@@ -1,4 +1,4 @@
-// v0.15.2
+// v0.15.3
 // 役割: Apple TV+ の video.textTracks を監視して字幕を取得・background.js へ送信
 //
 // 処理フロー:
@@ -42,6 +42,10 @@
 
   // スロットBの showing→hidden サイクル中は change イベントを無視するフラグ
   let activatingSlotB = false;
+
+  // notifyShowingTrack のデバウンスタイマー
+  // change イベントが短時間に複数発火する場合に最後の状態だけを送信する
+  let notifyTimer = null;
 
   // --------------------------------
   // cuechange リスナーの着脱
@@ -226,22 +230,26 @@
   }
 
   // showing トラックの状態を通知（スロットA用）
+  // 100ms デバウンス: change イベントが短時間に複数発火しても最後の状態だけを送信
   function notifyShowingTrack(video) {
-    const t = getShowingTrack(video);
-    if (t) {
-      if (t !== activeSlots["A"]) {
-        ctLog(`showing トラック変化 → assignTrack slot=A lang=${t.language}`);
-        assignTrack("A", t);
+    clearTimeout(notifyTimer);
+    notifyTimer = setTimeout(() => {
+      const t = getShowingTrack(video);
+      if (t) {
+        if (t !== activeSlots["A"]) {
+          ctLog(`showing トラック変化 → assignTrack slot=A lang=${t.language}`);
+          assignTrack("A", t);
+        }
+        safeSend({ type: "SHOWING_TRACK_CHANGED", lang: t.language, label: formatLabel(t) });
+      } else {
+        if (activeSlots["A"]) {
+          detachCueListener(activeSlots["A"]);
+          activeSlots["A"] = null;
+        }
+        ctLog(`showing トラックなし → SHOWING_TRACK_NONE 送信`);
+        safeSend({ type: "SHOWING_TRACK_NONE" });
       }
-      safeSend({ type: "SHOWING_TRACK_CHANGED", lang: t.language, label: formatLabel(t) });
-    } else {
-      if (activeSlots["A"]) {
-        detachCueListener(activeSlots["A"]);
-        activeSlots["A"] = null;
-      }
-      ctLog(`showing トラックなし → SHOWING_TRACK_NONE 送信`);
-      safeSend({ type: "SHOWING_TRACK_NONE" });
-    }
+    }, 100);
   }
 
   // --------------------------------
@@ -344,6 +352,8 @@
     video.addEventListener("loadedmetadata", () => {
       ctLog(`loadedmetadata: スロットをリセットし init() 再実行 src=${video.src?.slice(-40)}`);
       activatingSlotB = false;
+      clearTimeout(notifyTimer);
+      notifyTimer = null;
       ["A", "B"].forEach((slot) => {
         if (activeSlots[slot]) detachCueListener(activeSlots[slot]);
         activeSlots[slot] = null;
